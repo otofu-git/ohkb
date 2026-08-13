@@ -1,4 +1,4 @@
-"""orag CLI -- knowledge base for LLM agents."""
+"""ohkb CLI -- knowledge base for LLM agents."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import sys
 
 import click
 
-from orag import __version__
-from orag.kb import KnowledgeBase
+from ohkb import __version__
+from ohkb.kb import KnowledgeBase
 
 
 def _json_out(data: dict | list) -> None:
@@ -18,6 +18,13 @@ def _json_out(data: dict | list) -> None:
 
 def _get_kb() -> KnowledgeBase:
     return KnowledgeBase()
+
+
+def _refresh_index() -> None:
+    """Regenerate _index.md after a mutating CLI command."""
+    from ohkb.index import refresh_index
+
+    refresh_index()
 
 
 def _split_csv(val: str | None) -> list[str] | None:
@@ -31,9 +38,9 @@ def _split_csv(val: str | None) -> list[str] | None:
 
 
 @click.group()
-@click.version_option(__version__, prog_name="orag")
+@click.version_option(__version__, prog_name="ohkb")
 def main() -> None:
-    """orag -- A knowledge base for LLM agents."""
+    """ohkb — simple knowledge base for agents."""
 
 
 # ── search ──────────────────────────────────────────────────────────────────
@@ -43,10 +50,21 @@ def main() -> None:
 @click.argument("query")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 @click.option("-c", "--category", default=None, help="Filter by category.")
-def search(query: str, as_json: bool, category: str | None) -> None:
+@click.option(
+    "--limit",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Maximum number of results.",
+)
+def search(query: str, as_json: bool, category: str | None, limit: int) -> None:
     """Search the knowledge base."""
+    if limit < 1:
+        click.echo("Error: --limit must be >= 1.", err=True)
+        raise SystemExit(1)
+
     kb = _get_kb()
-    results = kb.search(query, category=category)
+    results = kb.search(query, category=category, limit=limit)
 
     if as_json:
         _json_out(results)
@@ -79,7 +97,9 @@ def search(query: str, as_json: bool, category: str | None) -> None:
 @click.option("--entity-type", default="concept", help="Entity type.")
 @click.option("--source", default="manual", help="Source: manual, document, url.")
 @click.option("--overwrite", is_flag=True, help="Overwrite if exists.")
-@click.option("-f", "--file", "from_file", type=click.Path(exists=True), help="Read content from file.")
+@click.option(
+    "-f", "--file", "from_file", type=click.Path(exists=True), help="Read content from file."
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 def learn(
     content: str,
@@ -124,14 +144,16 @@ def learn(
         )
     except FileExistsError as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     # Print warnings to stderr
     for w in result.get("warnings", []):
         click.echo(f"Warning: {w}", err=True)
+
+    _refresh_index()
 
     if as_json:
         _json_out(result)
@@ -150,9 +172,9 @@ def get(path: str, as_json: bool) -> None:
     kb = _get_kb()
     try:
         result = kb.get(path)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     if as_json:
         _json_out(result)
@@ -195,7 +217,7 @@ def edit(
             lines_tuple = (int(parts[0]), int(parts[1]))
         except ValueError:
             click.echo("Error: --lines values must be integers.", err=True)
-            raise SystemExit(1)
+            raise SystemExit(1) from None
 
     kb = _get_kb()
     try:
@@ -209,7 +231,9 @@ def edit(
         )
     except (FileNotFoundError, IndexError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
+
+    _refresh_index()
 
     if as_json:
         _json_out(result)
@@ -254,9 +278,14 @@ def meta(
             category=category,
             entity_type=entity_type,
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
+    except FileExistsError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+
+    _refresh_index()
 
     if as_json:
         _json_out(result)
@@ -276,14 +305,85 @@ def forget(path: str, reason: str, as_json: bool) -> None:
     kb = _get_kb()
     try:
         result = kb.forget(path, reason=reason)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
+
+    _refresh_index()
 
     if as_json:
         _json_out(result)
     else:
         click.echo(f"Archived: {result['path']}")
+
+
+# ── restore ─────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.argument("path", required=False, default=None)
+@click.option(
+    "--archive",
+    "archive_path",
+    default=None,
+    help="Specific archive-relative path to restore.",
+)
+@click.option("--overwrite", is_flag=True, help="Overwrite if the wiki entry exists.")
+@click.option("--list", "list_only", is_flag=True, help="List archives instead of restoring.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def restore(
+    path: str | None,
+    archive_path: str | None,
+    overwrite: bool,
+    list_only: bool,
+    as_json: bool,
+) -> None:
+    """Restore an archived knowledge entry.
+
+    Examples:
+
+      ohkb restore test/temp.md           # latest archive for that path
+      ohkb restore --archive test/temp.md # specific archive file
+      ohkb restore --list                 # list all archives
+      ohkb restore test/temp.md --list    # list archives for one path
+    """
+    kb = _get_kb()
+
+    if list_only:
+        items = kb.list_archives(path)
+        if as_json:
+            _json_out(items)
+            return
+        if not items:
+            click.echo("No archives found.")
+            return
+        for item in items:
+            click.echo(f"  {item['path']:<50} original={item['original']}")
+        return
+
+    if not path and not archive_path:
+        click.echo(
+            "Error: specify PATH (original wiki path) or --archive.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    try:
+        result = kb.restore(
+            path,
+            archive_path=archive_path,
+            overwrite=overwrite,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+
+    _refresh_index()
+
+    if as_json:
+        _json_out(result)
+    else:
+        click.echo(f"Restored: {result['path']} (from {result['restored_from']})")
 
 
 # ── tree ────────────────────────────────────────────────────────────────────
@@ -299,7 +399,7 @@ def _render_tree(node: dict, indent: int, path_prefix: str, depth: int) -> None:
         elif isinstance(child, dict) and child.get("_truncated"):
             # Directory truncated by depth limit
             full_path = f"{path_prefix}/{name}".lstrip("/")
-            click.echo(f"{prefix}  {name}/  ...  (run: orag tree {full_path} --depth {depth})")
+            click.echo(f"{prefix}  {name}/  ...  (run: ohkb tree {full_path} --depth {depth})")
         else:
             # Expanded directory
             click.echo(f"{prefix}  {name}/")
@@ -314,20 +414,20 @@ def tree(path: str, as_json: bool, depth: int) -> None:
     """Browse the knowledge structure.
 
     Expands up to DEPTH levels. Directories deeper than that are shown as
-    '...' with a hint to drill down using 'orag tree <path>'.
+    '...' with a hint to drill down using 'ohkb tree <path>'.
 
     Examples:
 
-      orag tree                  # root, 2 levels deep
-      orag tree python           # zoom into python category
-      orag tree python --depth 3 # expand deeper
+      ohkb tree                  # root, 2 levels deep
+      ohkb tree python           # zoom into python category
+      ohkb tree python --depth 3 # expand deeper
     """
     kb = _get_kb()
     try:
         result = kb.tree(path, depth=depth)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     if as_json:
         _json_out(result)
@@ -359,6 +459,8 @@ def status(as_json: bool) -> None:
 
     click.echo(f"Entries:    {info['indexed_entries']}")
     click.echo(f"Files:      {info['files_on_disk']}")
+    sync = "yes" if info.get("in_sync", True) else "NO — run: ohkb reindex"
+    click.echo(f"In sync:    {sync}")
     click.echo(f"Categories: {', '.join(info['categories']) if info['categories'] else '(none)'}")
     click.echo(f"Data dir:   {info['data_dir']}")
 
@@ -388,6 +490,171 @@ def lint(as_json: bool) -> None:
     click.echo(f"\n{len(issues)} issue(s) found.")
 
 
+# ── reindex ─────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def reindex(as_json: bool) -> None:
+    """Rebuild the search index from wiki files on disk.
+
+    Files are the source of truth. Use after manual edits or when status
+    reports the index is out of sync.
+    """
+    kb = _get_kb()
+    result = kb.reindex()
+    _refresh_index()
+
+    if as_json:
+        _json_out(result)
+        return
+
+    click.echo(f"Reindexed {result['indexed']} entries.")
+    for err in result.get("errors", []):
+        click.echo(f"  Error {err['path']}: {err['error']}", err=True)
+    if result["status"] != "ok":
+        raise SystemExit(1)
+
+
+# ── index ───────────────────────────────────────────────────────────────────
+
+
+@main.command("index")
+def index_cmd() -> None:
+    """Show the auto-generated knowledge base index (_index.md)."""
+    from ohkb.index import read_index
+
+    click.echo(read_index())
+
+
+# ── init ────────────────────────────────────────────────────────────────────
+
+
+@main.command("init")
+@click.option("--force", is_flag=True, help="Overwrite log header and agent schema.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def init_cmd(force: bool, as_json: bool) -> None:
+    """Scaffold the data directory, sources/, log, and agent schema."""
+    kb = _get_kb()
+    result = kb.init(force=force)
+    if as_json:
+        _json_out(result)
+    else:
+        click.echo(f"Initialized: {result['data_dir']}")
+        click.echo(f"  wiki:    {result['wiki']}")
+        click.echo(f"  sources: {result['sources']}")
+        click.echo(f"  archive: {result['archive']}")
+        click.echo(f"  log:     {result['log']}")
+        click.echo(f"  schema:  {result['agent_schema']}")
+
+
+# ── source ──────────────────────────────────────────────────────────────────
+
+
+@main.group()
+def source() -> None:
+    """Manage immutable raw sources (optional intake layer)."""
+
+
+@source.command("add")
+@click.argument("target")
+@click.option("--name", default=None, help="Destination filename under sources/.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def source_add(target: str, name: str | None, as_json: bool) -> None:
+    """Copy a local file into sources/."""
+    kb = _get_kb()
+    try:
+        result = kb.source_add(target, name=name)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    if as_json:
+        _json_out(result)
+    else:
+        click.echo(f"Source added: {result['path']} ({result['bytes']} bytes)")
+
+
+@source.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def source_list(as_json: bool) -> None:
+    """List files under sources/."""
+    kb = _get_kb()
+    items = kb.source_list()
+    if as_json:
+        _json_out(items)
+        return
+    if not items:
+        click.echo("No sources.")
+        return
+    for item in items:
+        click.echo(f"  {item['path']:<50} {item['bytes']} bytes")
+
+
+# ── extract ─────────────────────────────────────────────────────────────────
+
+
+@main.command("extract")
+@click.argument("target")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def extract_cmd(target: str, as_json: bool) -> None:
+    """Extract plain text from a local file (no LLM)."""
+    kb = _get_kb()
+    try:
+        result = kb.extract(target)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    if as_json:
+        _json_out(result)
+    else:
+        click.echo(result["text"])
+
+
+# ── log ─────────────────────────────────────────────────────────────────────
+
+
+@main.command("log")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def log_cmd(limit: int, as_json: bool) -> None:
+    """Show recent activity log entries."""
+    kb = _get_kb()
+    lines = kb.activity_log(limit=limit)
+    if as_json:
+        _json_out(lines)
+        return
+    if not lines:
+        click.echo("Log is empty.")
+        return
+    for line in lines:
+        click.echo(line)
+
+
+# ── related ─────────────────────────────────────────────────────────────────
+
+
+@main.command("related")
+@click.argument("path")
+@click.option("--limit", type=int, default=10, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def related_cmd(path: str, limit: int, as_json: bool) -> None:
+    """List entries that share tags with PATH."""
+    kb = _get_kb()
+    try:
+        items = kb.related(path, limit=limit)
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    if as_json:
+        _json_out(items)
+        return
+    if not items:
+        click.echo("No related entries.")
+        return
+    for item in items:
+        click.echo(f"  {item['path']:<40} shared_tags={item['shared_tags']}")
+
+
 # ── serve ───────────────────────────────────────────────────────────────────
 
 
@@ -396,37 +663,29 @@ def lint(as_json: bool) -> None:
     "--mode",
     type=click.Choice(["readonly", "managed", "autonomous"]),
     default="autonomous",
-    help="Server mode: readonly (read only), managed (write with confirmation), autonomous (full access).",
+    help=(
+        "Server mode: readonly (read only), managed (write with confirmation),"
+        " autonomous (full access)."
+    ),
 )
-@click.option(
-    "--transport",
-    type=click.Choice(["stdio", "streamable-http"]),
-    default="stdio",
-    help="MCP transport protocol.",
-)
-@click.option("--port", type=int, default=8000, help="Port for HTTP transport.")
-@click.option("--host", default="127.0.0.1", help="Host for HTTP transport.")
-def serve(mode: str, transport: str, port: int, host: str) -> None:
-    """Start the MCP server."""
+def serve(mode: str) -> None:
+    """Start the local MCP stdio server."""
     try:
-        from orag.serve import create_server
+        from ohkb.serve import create_server
     except ImportError:
         click.echo(
-            "Error: MCP dependencies not installed.\n"
-            "Install with: pip install orag[serve]",
+            "Error: MCP dependencies not installed.\nInstall with: pip install ohkb[serve]",
             err=True,
         )
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     import os
 
-    os.environ["ORAG_MODE"] = mode
+    os.environ["OHKB_MODE"] = mode
     server = create_server(mode=mode)
-
-    if transport == "stdio":
-        server.run(transport="stdio")
-    else:
-        server.run(transport="streamable-http", host=host, port=port)
+    click.echo(f"ohkb MCP server starting (mode={mode}, transport=stdio) ...", err=True)
+    click.echo("Waiting for MCP client on stdin. Press Ctrl+C to stop.", err=True)
+    server.run(transport="stdio")
 
 
 if __name__ == "__main__":

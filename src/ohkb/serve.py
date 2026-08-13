@@ -1,23 +1,23 @@
-"""MCP server for orag -- exposes the knowledge base as tools, resources, and prompts.
+"""MCP server for ohkb -- exposes the knowledge base as tools, resources, and prompts.
 
 Three modes control which tools are available:
 
-    readonly    -- search, get, tree, status, lint only (CS bot)
-    managed     -- adds learn, edit, meta, forget with confirmation guidance (CS admin)
+    readonly    -- search, get, tree, status, lint, reindex (CS bot)
+    managed     -- adds learn, edit, meta, forget, restore with confirmation (CS admin)
     autonomous  -- full access, no confirmation needed (personal assistant)
 
 Usage:
-    orag serve                          # autonomous mode, stdio transport
-    orag serve --mode readonly          # read-only
-    orag serve --mode managed           # write with confirmation prompts
-    orag serve --transport streamable-http --port 9000
+    ohkb serve                          # autonomous mode, local stdio transport
+    ohkb serve --mode readonly          # read-only
+    ohkb serve --mode managed           # write with confirmation prompts
+
+The server intentionally exposes no HTTP transport.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -25,9 +25,9 @@ from dataclasses import dataclass
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
-from orag.index import read_index, refresh_index
-from orag.kb import KnowledgeBase
-from orag.store import Store
+from ohkb.index import read_index, refresh_index
+from ohkb.kb import KnowledgeBase
+from ohkb.store import Store
 
 # ── Types ───────────────────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ def create_server(mode: Mode = "autonomous") -> FastMCP:
 
     instructions = _build_instructions(mode)
     mcp = FastMCP(
-        "orag",
+        "ohkb",
         instructions=instructions,
         lifespan=_make_lifespan(mode),
     )
@@ -118,40 +118,49 @@ def create_server(mode: Mode = "autonomous") -> FastMCP:
     return mcp
 
 
-def _build_instructions(mode: Mode) -> str:
+def _build_instructions(mode: Mode, index_content: str = "") -> str:
     """Build server-level instructions that describe the KB and the mode."""
     base = (
-        "orag is a knowledge base for LLM agents. "
+        "ohkb is a knowledge base for LLM agents. "
         "Knowledge is stored as atomic Markdown files with YAML frontmatter. "
-        "Search uses SQLite FTS5 (BM25 ranking) over titles, tags, aliases, and content. "
-        "No embeddings or vector database is used.\n\n"
-        "WORKFLOW: Always start by reading the orag://index resource to understand "
-        "the knowledge base structure. Then use the search tool to find relevant entries, "
-        "and the get tool to read full content.\n\n"
+        "Search uses SQLite FTS5 with BM25 ranking (title > tags > aliases > content weight). "
+        "No embeddings — tags and aliases drive search quality.\n\n"
+        "## MANDATORY WORKFLOW\n\n"
+        "STEP 1 — ALWAYS call 'index' at the start of every conversation.\n"
+        "         This shows what categories and entries exist in the KB.\n"
+        "         Do NOT skip this step even if you think you know the KB.\n\n"
+        "STEP 2 — Call 'search' with keywords from the user's question.\n"
+        "         Multi-word queries use AND logic. If no results, try fewer words.\n\n"
+        "STEP 3 — Call 'get' with the exact path from search results to read full content.\n"
+        "         'get' takes a path like 'category/file.md', NOT a search query.\n\n"
     )
 
     if mode == "readonly":
         return base + (
-            "MODE: Read-only. You can search and read knowledge but cannot modify it. "
-            "Use search and get to find and retrieve information to answer questions."
+            "MODE: Read-only. Tools: index, search, get, tree, status, lint, reindex, "
+            "log, related, extract, source_list.\n"
+            "Use index → search → get to answer questions."
         )
     elif mode == "managed":
         return base + (
-            "MODE: Managed. You can read and write knowledge. "
-            "Before making any changes (learn, edit, meta, forget), you MUST:\n"
-            "1. Search for related/duplicate entries first.\n"
+            "MODE: Managed. Tools: index, search, get, tree, status, lint, reindex, "
+            "log, related, extract, source_list, learn, edit, meta, forget, restore, "
+            "source_add.\n\n"
+            "Before ANY write (learn, edit, meta, forget, restore, source_add):\n"
+            "1. Call 'search' to check for duplicates.\n"
             "2. Describe the proposed change to the user.\n"
-            "3. Wait for explicit user confirmation before executing.\n"
-            "4. After changes, check if the _index needs refreshing.\n"
-            "5. Look for related entries that might also need updates."
+            "3. Wait for explicit user confirmation.\n"
+            "4. After writing, call 'index' to confirm the change."
         )
     else:  # autonomous
         return base + (
-            "MODE: Autonomous. You have full read/write access. "
-            "You can search, read, create, edit, and archive knowledge freely. "
-            "Search for duplicates before creating new entries. "
-            "Keep entries atomic (< 3000 chars). Always provide good tags and aliases. "
-            "After mutations, related entries may need updates too."
+            "MODE: Autonomous. Full tools including learn, edit, meta, forget, restore, "
+            "source_add.\n\n"
+            "Before learn: call 'search' to avoid duplicates.\n"
+            "After any write: call 'index' to confirm the change.\n"
+            "Keep entries atomic (one concept, < 3000 chars).\n"
+            "Provide 3-7 tags and key synonyms as aliases.\n"
+            "Raw material: source_add → extract → you classify → learn."
         )
 
 
@@ -161,7 +170,7 @@ def _build_instructions(mode: Mode) -> str:
 def _register_resources(mcp: FastMCP) -> None:
     """Register MCP resources (read-only data endpoints)."""
 
-    @mcp.resource("orag://index")
+    @mcp.resource("ohkb://index")
     def index_resource() -> str:
         """Knowledge base index -- read this first to understand what knowledge is available.
 
@@ -181,21 +190,35 @@ def _register_read_tools(mcp: FastMCP) -> None:
     async def search(
         query: str,
         category: str = "",
+        limit: int = 20,
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        """Search the knowledge base using full-text search.
+        """Search the knowledge base using full-text search (BM25 ranked).
 
-        Uses SQLite FTS5 with BM25 ranking. Searches across titles, tags, aliases, and content.
-        Returns matching entries with paths, titles, tags, and relevance scores.
+        PREREQUISITE: If you have not called 'index' yet in this conversation,
+        call 'index' FIRST to understand the KB structure, then come back to search.
+
+        Searches titles, tags, aliases, and content.
+        Returns a list of matching entries with path, title, tags, and score.
+
+        NEXT STEP: Use 'get' with the returned path to read the full content.
+        Example: search("pricing") → result has path "beusable/geo/pricing/geo-요금제.md"
+                 → call get(path="beusable/geo/pricing/geo-요금제.md") to read it.
+
+        If no results: retry with fewer or different keywords. Multi-word queries
+        use AND logic — if too specific, try a single keyword instead.
+        Category filter uses prefix matching: 'python' also returns 'python/internals' entries.
 
         Args:
-            query: Search query text. Queries are phrase-matched for safety;
-                special FTS5 operators (AND, OR, NOT, prefix*) are not supported.
-            category: Optional category filter to narrow results.
+            query: Search keywords. Multi-word = AND (all must match). Single word recommended
+                   for broad topics.
+            category: Optional category prefix to narrow results.
+            limit: Maximum number of results (default 20).
         """
         kb = _kb(ctx)
         cat = category if category else None
-        results = await asyncio.to_thread(kb.search, query, category=cat)
+        lim = limit if limit >= 1 else 20
+        results = await asyncio.to_thread(kb.search, query, category=cat, limit=lim)
         if not results:
             return "No results found."
         return _fmt(results)
@@ -205,15 +228,16 @@ def _register_read_tools(mcp: FastMCP) -> None:
         path: str,
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        """Read a knowledge entry with line numbers, character count, and line count.
+        """Read the full content of a knowledge entry by its exact path.
 
-        Returns the full file content with metadata about size. Use this after
-        search to read the detailed content of a specific entry.
+        Use this after 'search' to read the detailed content of a specific entry.
+        Returns the file with line numbers and character count.
 
-        The char count helps you gauge document size (recommended max: 3000 chars).
+        IMPORTANT: 'path' must be the exact path from search results,
+        e.g. 'beusable/geo/pricing/geo-요금제.md'. Do NOT pass a search query here.
 
         Args:
-            path: Relative path like 'category/file.md'.
+            path: Exact relative path from search results, e.g. 'category/file.md'.
         """
         kb = _kb(ctx)
         result = await asyncio.to_thread(kb.get, path)
@@ -224,16 +248,41 @@ def _register_read_tools(mcp: FastMCP) -> None:
         return header + "\n" + "\n".join(numbered)
 
     @mcp.tool()
-    async def tree(
+    async def index(
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        """Browse the knowledge base structure.
+        """Read the knowledge base index. ALWAYS call this before search or any other tool.
 
-        Returns all categories and their entries. Use this to understand
-        the organization of the knowledge base.
+        Required first step for every conversation. Shows all available categories,
+        entries, tags, and file sizes so you know what to search for.
+        Without this, you cannot know what knowledge exists in the knowledge base.
+
+        Call this before: search, get, learn, edit, meta, forget.
+        Keywords: knowledge base overview, what's available, list all, explore, browse,
+                  index, categories, entries, search preparation, knowledge base search.
+        """
+        return read_index()
+
+    @mcp.tool()
+    async def tree(
+        path: str = "",
+        depth: int = 2,
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Browse the knowledge base structure (categories and file list).
+
+        Use this to understand what topics exist before searching.
+        Returns category names and entry filenames — use 'get' with a path to read content.
+
+        Args:
+            path: Optional category path to zoom into (e.g. 'python' or 'python/internals').
+                  Empty string = wiki root.
+            depth: How many directory levels to expand (default 2). Directories deeper
+                   than this appear as truncated; call again with a deeper path.
         """
         kb = _kb(ctx)
-        result = await asyncio.to_thread(kb.tree)
+        d = depth if depth >= 1 else 2
+        result = await asyncio.to_thread(kb.tree, path, depth=d)
         return _fmt(result)
 
     @mcp.tool()
@@ -242,7 +291,8 @@ def _register_read_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Show knowledge base statistics.
 
-        Returns entry counts, file counts, category list, and data directory path.
+        Returns entry counts, file counts, in_sync flag, category list, and data directory path.
+        If in_sync is false, run 'reindex'.
         """
         kb = _kb(ctx)
         result = await asyncio.to_thread(kb.status)
@@ -254,14 +304,77 @@ def _register_read_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Check knowledge base health.
 
-        Reports issues: oversized files (> 3000 chars), missing tags/aliases,
-        invalid frontmatter, and empty categories.
+        Reports issues: index/disk drift, oversized files (> 3000 chars), missing
+        tags/aliases, invalid frontmatter, category mismatches, and empty categories.
         """
         kb = _kb(ctx)
         issues = await asyncio.to_thread(kb.lint)
         if not issues:
             return "No issues found."
         return _fmt(issues)
+
+    @mcp.tool()
+    async def reindex(
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Rebuild the search index from wiki files on disk.
+
+        Files are the source of truth. Use when status reports in_sync=false,
+        or after manual file edits outside ohkb.
+        """
+        kb = _kb(ctx)
+        result = await asyncio.to_thread(kb.reindex)
+        await asyncio.to_thread(refresh_index)
+        return _fmt(result)
+
+    @mcp.tool()
+    async def log(
+        limit: int = 50,
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Read recent activity log lines (newest first)."""
+        kb = _kb(ctx)
+        lines = await asyncio.to_thread(kb.activity_log, limit)
+        if not lines:
+            return "Log is empty."
+        return _fmt(lines)
+
+    @mcp.tool()
+    async def related(
+        path: str,
+        limit: int = 10,
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """List entries that share tags with the given path (no embeddings)."""
+        kb = _kb(ctx)
+        items = await asyncio.to_thread(kb.related, path, limit=limit)
+        if not items:
+            return "No related entries."
+        return _fmt(items)
+
+    @mcp.tool()
+    async def extract(
+        target: str,
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Extract plain text from a local file. Does not call an LLM.
+
+        Use the returned text to decide category/tags, then call learn.
+        """
+        kb = _kb(ctx)
+        result = await asyncio.to_thread(kb.extract, target)
+        return _fmt(result)
+
+    @mcp.tool()
+    async def source_list(
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """List immutable raw files under sources/."""
+        kb = _kb(ctx)
+        items = await asyncio.to_thread(kb.source_list)
+        if not items:
+            return "No sources."
+        return _fmt(items)
 
 
 # ── Write Tools ─────────────────────────────────────────────────────────────
@@ -273,14 +386,6 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
     In managed mode, tool descriptions include confirmation guidance.
     In autonomous mode, tools execute without additional prompts.
     """
-
-    confirm_note = (
-        "\n\nIMPORTANT (managed mode): Before executing, describe the proposed "
-        "change to the user and wait for confirmation. Also search for related "
-        "entries that might need updates."
-        if managed
-        else ""
-    )
 
     @mcp.tool()
     async def learn(
@@ -294,21 +399,22 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         overwrite: bool = False,
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        f"""Store a new knowledge entry in the knowledge base.
+        """Store a new knowledge entry in the knowledge base.
+
+        WORKFLOW: Always call 'search' first to check for duplicates before storing.
 
         Creates an atomic Markdown file with YAML frontmatter and indexes it for search.
-        Always search first to avoid duplicates. Keep content under 3000 characters.
-        Tags and aliases are critical for search quality -- always provide them.{confirm_note}
+        Keep content under 3000 characters (one fact per entry).
+        Tags and aliases are critical — they drive search quality without embeddings.
+        Provide 3-7 tags and key synonyms as aliases (comma-separated strings).
+        Category supports nested paths (e.g. 'python/internals').
 
         Args:
-            content: The knowledge content (plain text or Markdown).
-            title: Entry title (used for filename generation).
-            category: Category directory name.
-            tags: Comma-separated keywords for search.
-            aliases: Comma-separated synonyms/alternative phrasings.
-            entity_type: Type: concept, person, event, product, etc.
-            source: Origin: manual, document, url.
-            overwrite: If true, replace existing entry with same title/category.
+            content: The knowledge content (plain text, under 3000 chars).
+            title: Short descriptive title.
+            category: Category path, e.g. 'python' or 'python/internals'.
+            tags: Comma-separated tags, e.g. 'pricing,요금제,enterprise'.
+            aliases: Comma-separated synonyms, e.g. 'GEO 가격,geo pricing'.
         """
         kb = _kb(ctx)
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -342,10 +448,10 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         delete: int | None = None,
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        f"""Edit a knowledge entry at the line level.
+        """Edit a knowledge entry at the line level.
 
         Use 'get' first to see the file with line numbers, then specify the edit.
-        Exactly one edit operation must be specified per call.{confirm_note}
+        Exactly one edit operation must be specified per call.
 
         Args:
             path: Relative path like 'category/file.md'.
@@ -388,10 +494,10 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         entity_type: str = "",
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        f"""Update metadata of a knowledge entry without changing the content body.
+        """Update metadata of a knowledge entry without changing the content body.
 
         Use this to add/remove tags, aliases, change the title, move to a new category,
-        or change entity type. Multiple operations can be done in a single call.{confirm_note}
+        or change entity type. Multiple operations can be done in a single call.
 
         Args:
             path: Relative path like 'category/file.md'.
@@ -432,10 +538,11 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         reason: str = "",
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        f"""Archive a knowledge entry (soft delete).
+        """Archive a knowledge entry (soft delete).
 
         Moves the file to the archive directory and removes it from the search index.
-        The file is preserved in the archive and can be recovered manually if needed.{confirm_note}
+        If the same path was archived before, a timestamped copy is kept.
+        Use 'restore' to bring an entry back.
 
         Args:
             path: Relative path like 'category/file.md'.
@@ -447,6 +554,47 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         # Refresh index after mutation
         await asyncio.to_thread(refresh_index)
 
+        return _fmt(result)
+
+    @mcp.tool()
+    async def restore(
+        path: str = "",
+        archive_path: str = "",
+        overwrite: bool = False,
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Restore an archived knowledge entry back into the wiki.
+
+        Provide either path (original wiki path — restores the latest archive)
+        or archive_path (specific file under archive/).
+
+        Args:
+            path: Original wiki path, e.g. 'category/file.md'.
+            archive_path: Specific archive-relative path if selecting a version.
+            overwrite: Replace an existing wiki entry if present.
+        """
+        kb = _kb(ctx)
+        result = await asyncio.to_thread(
+            kb.restore,
+            path or None,
+            archive_path=archive_path or None,
+            overwrite=overwrite,
+        )
+        await asyncio.to_thread(refresh_index)
+        return _fmt(result)
+
+    @mcp.tool()
+    async def source_add(
+        target: str,
+        name: str = "",
+        ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
+    ) -> str:
+        """Copy an immutable local file under sources/.
+
+        Does not create wiki entries. Use extract + learn after intake.
+        """
+        kb = _kb(ctx)
+        result = await asyncio.to_thread(kb.source_add, target, name=name or None)
         return _fmt(result)
 
 
@@ -463,11 +611,11 @@ def _register_prompts(mcp: FastMCP) -> None:
         Guides the LLM through a systematic search-and-read workflow.
         """
         return (
-            f"Research the topic '{topic}' in the orag knowledge base.\n\n"
+            f"Research the topic '{topic}' in the ohkb knowledge base.\n\n"
             "Steps:\n"
-            "1. Read the orag://index resource to understand the KB structure.\n"
-            "2. Use the search tool with relevant keywords to find matching entries.\n"
-            "3. Use the get tool to read the full content of the most relevant entries.\n"
+            "1. Read ohkb://index to understand the KB structure.\n"
+            "2. Search with relevant keywords; if no results, retry with synonyms or tags.\n"
+            "3. Use get to read the full content of the most relevant entries.\n"
             "4. Synthesize a comprehensive answer citing specific entries.\n"
             "5. If information is incomplete, note what is missing."
         )
@@ -480,12 +628,12 @@ def _register_prompts(mcp: FastMCP) -> None:
         """
         return (
             "Extract key facts from the following text and store each as a separate "
-            "knowledge entry in orag.\n\n"
+            "knowledge entry in ohkb.\n\n"
             "Rules:\n"
             "- Search first to avoid duplicates.\n"
             "- One fact = one entry (keep under 3000 chars).\n"
-            "- Provide descriptive tags and aliases for each entry.\n"
-            "- Choose an appropriate category.\n"
+            "- Provide 3-7 tags and key synonyms as aliases.\n"
+            "- Reuse existing categories from the index; use nested paths for sub-topics.\n"
             "- Group related facts under the same category.\n\n"
             f"Text to process:\n\n{text}"
         )
@@ -498,12 +646,12 @@ def _register_prompts(mcp: FastMCP) -> None:
         """
         scope = f"category '{category}'" if category else "the entire knowledge base"
         return (
-            f"Review and organize {scope} in orag.\n\n"
+            f"Review and organize {scope} in ohkb.\n\n"
             "Steps:\n"
             "1. Run lint to find issues.\n"
-            "2. Fix any missing tags or aliases.\n"
+            "2. Fix missing tags or aliases (aim for 3-7 tags, key synonyms as aliases).\n"
             "3. Split oversized entries (> 3000 chars) into atomic facts.\n"
             "4. Check for duplicate or near-duplicate entries.\n"
-            "5. Ensure categories are logically organized.\n"
+            "5. Consider nesting flat categories (e.g. many 'python' entries → 'python/stdlib').\n"
             "6. Report a summary of changes made."
         )

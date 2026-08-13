@@ -1,273 +1,437 @@
-# orag
+# ohkb
 
-[![PyPI](https://img.shields.io/pypi/v/orag.svg)](https://pypi.org/project/orag/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/anomalyco/orag/blob/main/LICENSE)
+**A simple, local knowledge base for agents.**
 
-> **LLM 에이전트가 스스로 기억하고, 스스로 정리하는 지식 베이스.**
-> 임베딩 없음. 벡터 DB 없음. 파일과 SQLite만 있으면 됨.
+ohkb gives an agent a stable set of tools for storing, finding, updating, and retiring knowledge across sessions. Entries are ordinary Markdown files. Search is provided by a local SQLite FTS5 index that can be rebuilt at any time.
 
-LLM 에이전트는 대화가 끝나면 모든 것을 잊습니다. orag는 이 문제를 해결합니다.
-에이전트가 학습한 사실을 스스로 저장하고, 필요할 때 꺼내 쓰고, 낡은 지식을 스스로 정리할 수 있도록 설계된 도구입니다.
-무거운 인프라 없이, 에이전트 자신이 지식을 관리하는 두뇌가 됩니다.
+ohkb does not call language models, create embeddings, or require a vector database. The agent decides what is worth keeping; ohkb keeps it organized and searchable.
 
-```
-orag search "python GIL"
-# ╭──────────────────────────────────────────────╮
-# │ python/free-threaded-python.md  (score: 4.2) │
-# │ Tags: GIL, CPython, free-threading, PEP-703  │
-# ╰──────────────────────────────────────────────╯
-```
+[한국어](README_kr.md) · [Architecture](docs/ARCHITECTURE.md) · [MCP reference](docs/MCP_TOOLS.md) · [Roadmap](docs/ROADMAP.md)
 
-## orag를 왜 사용하나요?
+## At a glance
 
-기존 RAG 도구는 하나의 사실을 저장하기 위해 임베딩 모델, 벡터 데이터베이스, API 호출이 필요합니다.
-이는 곧 외부 서비스 의존, 높은 운영 비용, 느린 속도, 복잡한 마이그레이션을 의미합니다.
+| | |
+|---|---|
+| **Storage** | Markdown files with YAML frontmatter |
+| **Search** | SQLite FTS5 with BM25 ranking |
+| **Interfaces** | CLI and local MCP server |
+| **Model usage** | None |
+| **Network access** | None in core commands |
+| **Data location** | `~/.ohkb`, configurable with `OHKB_DIR` |
+| **Python** | 3.10+ |
 
-orag는 그 짐을 LLM 자신에게 돌려줍니다:
+## Why ohkb
 
-- **임베딩 불필요** -- 임베딩 역할을 LLM에게 위임합니다. LLM이 저장 시점에 의미 있는 태그와 별칭을 직접 결정하므로, 별도의 임베딩 모델 없이도 의미 기반 검색이 작동합니다. **로컬 모델에 특히 적합합니다.**
-- **벡터 DB 불필요** -- 지식은 순수 마크다운 파일로 존재합니다. `git`, `grep`, 텍스트 에디터로 직접 읽고 관리할 수 있습니다.
-- **가볍고 빠름** -- 단일 SQLite 파일, 네트워크 왕복 없음, 즉시 시작. 외부 서비스에 의존하지 않아 언제 어디서나 동일하게 동작합니다.
-- **마이그레이션 간편** -- 모든 지식이 평문 마크다운 파일입니다. 복사하면 끝입니다. 벤더 락인 없음.
-- **컨텍스트 비용 절약** -- 검색 결과는 기본적으로 간결하게 출력됩니다. `--json` 모드로 필요한 데이터만 정확하게 가져와 불필요한 토큰 낭비를 막습니다.
+Agents often need a small amount of durable, curated knowledge: project conventions, decisions, facts discovered during research, or details that should survive beyond one conversation.
 
-orag는 무거운 검색 인프라에 토큰을 낭비하지 않고, LLM 에이전트가 스스로 기억하고 진화하는 지식 베이스를 갖도록 설계되었습니다.
+A general note-taking application does not provide a predictable tool contract for agents. A full RAG stack may add ingestion pipelines, chunking, embeddings, and external services when all that is needed is reliable local memory. ohkb stays between those two extremes:
 
-## 설치
+- the agent chooses what to learn and how to classify it;
+- each entry remains readable and editable without ohkb;
+- tags and aliases provide explicit search signals;
+- the search database is an index, not the source of truth;
+- the same operations are available through the CLI and MCP.
 
-```bash
-# uv 사용 (권장)
-uv tool install orag
+The result is intentionally small: tools an agent can use to remember, rather than a system that decides or writes knowledge on the agent's behalf.
 
-# pip 사용
-pip install orag
+## Installation
 
-# pipx 사용
-pipx install orag
-```
-
-## 빠른 시작
+Install the CLI with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# 사실 저장
-orag learn "Python 3.13은 --disable-gil 플래그로 GIL을 비활성화할 수 있습니다" \
-  -t "자유 스레드 Python" -c python \
+uv tool install ohkb
+```
+
+Or with pip:
+
+```bash
+pip install ohkb
+```
+
+The MCP server is an optional extra:
+
+```bash
+uv tool install "ohkb[serve]"
+# or
+pip install "ohkb[serve]"
+```
+
+Check the installation:
+
+```bash
+ohkb --version
+```
+
+## Quick start
+
+Initialize the data directory:
+
+```bash
+ohkb init
+```
+
+Store an entry:
+
+```bash
+ohkb learn "Python 3.13 can be built without the GIL using --disable-gil." \
+  --title "Free-threaded Python" \
+  --category python \
   --tags "GIL,CPython,free-threading,PEP-703" \
   --aliases "nogil,no-GIL Python,GIL removal"
-
-# 검색
-orag search "GIL"
-
-# 줄 번호와 함께 읽기
-orag get "python/free-threaded-python.md"
-
-# 특정 줄 편집
-orag edit "python/free-threaded-python.md" --line 11 "Python 3.14에서 안정화됨."
-
-# 메타데이터 업데이트
-orag meta "python/free-threaded-python.md" --add-tags "3.14,stable"
-
-# 구조 탐색
-orag tree
-
-# 구식 지식 보관
-orag forget "python/free-threaded-python.md"
 ```
 
-모든 명령은 구조화된 출력을 위해 `--json`을 지원하므로 orag가 에이전트 도구로 자연스럽게 맞습니다.
+Search and read it:
 
-## 작동 원리
-
-```
-┌─────────────────────────────────────┐
-│             orag CLI                │
-├─────────────────────────────────────┤
-│           뇌 (핵심)                  │
-│                                     │
-│  ┌───────────┐   ┌───────────────┐  │
-│  │ Wiki (MD) │   │ SQLite (FTS5) │  │
-│  │           │◄─►│               │  │
-│  │ 한 가지   │   │ BM25 검색     │  │
-│  │ 사실 =    │   │ + 메타데이터  │  │
-│  │ 한 파일   │   │               │  │
-│  └───────────┘   └───────────────┘  │
-└─────────────────────────────────────┘
+```bash
+ohkb search "GIL"
+ohkb get "python/free-threaded-python.md"
 ```
 
-지식은 YAML 전문(frontmatter)이 있는 원자적 마크다운 파일로 저장됩니다.
-SQLite FTS5 인덱스는 제목, 태그, 별칭, 콘텐츠에 대한 빠른 전체 텍스트 검색을 제공합니다.
-**LLM 자체가 임베딩 역할을 대신합니다.** 저장 시점에 어떤 태그와 별칭을 붙일지 LLM이 직접 결정하기 때문에, 별도의 임베딩 모델이나 벡터 DB 없이도 의미 기반 검색이 작동합니다.
+Browse the knowledge base and check its state:
 
-### 파일 형식
+```bash
+ohkb tree
+ohkb status
+ohkb lint
+```
+
+Most commands support `--json`, which is the recommended output format when an agent or script is calling the CLI:
+
+```bash
+ohkb search "GIL" --json
+ohkb get "python/free-threaded-python.md" --json
+ohkb status --json
+```
+
+## Recommended agent workflow
+
+A reliable session usually follows the same sequence:
+
+1. Run `ohkb index` to see the current structure.
+2. Search before creating anything.
+3. Read exact paths returned by search.
+4. Add or update one focused fact at a time.
+5. Use `ohkb status` or `ohkb lint` to detect drift.
+
+```bash
+ohkb index
+ohkb search "deployment rollback" --json
+ohkb get "operations/deployment-rollback.md" --json
+ohkb learn "..." -t "..." -c operations --tags "..." --aliases "..." --json
+```
+
+`search` before `learn` is important. It keeps the knowledge base compact and avoids creating several entries for the same fact.
+
+## Knowledge entries
+
+Each entry is stored under `wiki/<category>/<slug>.md`. A title such as `Free-threaded Python` in category `python` becomes:
+
+```text
+wiki/python/free-threaded-python.md
+```
+
+The file is standard Markdown with YAML frontmatter:
 
 ```markdown
 ---
-title: 자유 스레드 Python
+title: Free-threaded Python
 category: python
-tags: [GIL, CPython, free-threading, PEP-703]
-aliases: [nogil, no-GIL Python, GIL removal]
-created: 2026-04-07T12:00:00Z
+tags:
+- GIL
+- CPython
+- free-threading
+- PEP-703
+aliases:
+- nogil
+- no-GIL Python
+entity_type: concept
+source: manual
+created: '2026-08-13T04:00:00+00:00'
+updated: '2026-08-13T04:00:00+00:00'
 ---
 
-Python 3.13은 실험적인 자유 스레딩 모드를 도입하며,
-이를 통해 --disable-gil 플래그로 GIL을 비활성화할 수 있습니다.
+Python 3.13 can be built without the GIL using --disable-gil.
 ```
 
-### 데이터 디렉토리
+One focused fact per file works best. Entries shorter than roughly 3,000 characters are recommended; `ohkb lint` reports oversized entries.
 
-```
-~/.orag/
-  _meta.db              # SQLite: FTS5 인덱스 + 메타데이터
-  wiki/
-    python/
-      free-threaded-python.md
-      asyncio-changes.md
-    _tables/             # DB 테이블의 자동 생성 문서
-  archive/               # 보관된 파일
-```
+### Categories
 
-## CLI 참고서
-
-### 검색 & 읽기
+Categories may be nested:
 
 ```bash
-orag search "query" [--json] [-c category]    # 전체 텍스트 검색
-orag get "category/file.md" [--json]           # 줄 번호와 함께 파일 읽기
-orag tree [--json]                             # 구조 탐색
-orag status [--json]                           # 통계
-orag lint [--json]                             # 상태 확인
+ohkb learn "..." \
+  --title "CPython garbage collection" \
+  --category "python/internals" \
+  --tags "CPython,GC,memory"
 ```
 
-### 쓰기
+This creates `python/internals/cpython-garbage-collection.md`. Filtering by a parent category includes its descendants:
 
 ```bash
-orag learn "content" -t "title" -c "category" \
-  --tags "k1,k2" --aliases "a1,a2" \
-  [--entity-type concept|person|event|product] \
-  [--source manual|document|url] \
-  [--overwrite]
-
-# 파일에서
-orag learn "" -t "title" -c "category" --tags "..." -f ./draft.md
-
-# 표준 입력에서
-echo "content" | orag learn -t "title" -c "category" --tags "..."
+ohkb search "garbage collection" --category python
 ```
 
-### 편집
+### Tags and aliases
+
+Tags and aliases are part of the retrieval model, not decorative metadata.
+
+- **Tags** connect entries that share concepts and power `ohkb related`.
+- **Aliases** capture alternate names, abbreviations, and terms users are likely to search for.
+
+Three to seven useful tags and a few genuine aliases are usually enough. Avoid adding broad terms that do not help distinguish the entry.
+
+## Search
+
+Search uses SQLite FTS5 and BM25. Fields are weighted in this order:
+
+```text
+title > tags > aliases > content
+```
+
+Search terms use prefix matching and are combined strictly first, with a bounded broader fallback when necessary. Results include a relative score from `0` to `1`; the score is meaningful within that result set rather than as a global relevance value.
 
 ```bash
-orag edit "path" --line 10 "new content"       # 줄 바꾸기
-orag edit "path" --lines 10-12 "replacement"   # 범위 바꾸기
-orag edit "path" --after 5 "inserted line"     # 뒤에 삽입
-orag edit "path" --delete 10                   # 줄 삭제
+ohkb search "python gil"
+ohkb search "gil" --category python --limit 5
+ohkb search "free threading" --json
 ```
 
-### 메타데이터
+No embeddings are generated. Search quality comes from concise entries, descriptive titles, and metadata selected when the entry is written.
+
+## Reading and editing
+
+`get` returns the entry with line numbers so an agent can make a precise edit:
 
 ```bash
-orag meta "path" --add-tags "new-tag"
-orag meta "path" --remove-tags "old-tag"
-orag meta "path" --add-aliases "synonym"
-orag meta "path" --title "새로운 제목"
-orag meta "path" --category "new-category"
+ohkb get "python/free-threaded-python.md"
 ```
 
-### 보관
+Use one edit operation at a time:
 
 ```bash
-orag forget "path" [--reason "obsolete"]
+# Replace one body line
+ohkb edit "python/free-threaded-python.md" --line <line-number> "New text"
+
+# Replace a range
+ohkb edit "python/free-threaded-python.md" --lines 20-22 "Replacement text"
+
+# Insert or delete
+ohkb edit "python/free-threaded-python.md" --after 20 "Additional detail"
+ohkb edit "python/free-threaded-python.md" --delete 21
 ```
 
-## 설계 원칙
-
-1. **한 가지 사실 = 한 파일.** 파일을 원자적으로 유지하고 작게 (< 3,000자). `orag lint`는 크기가 너무 큰 파일에 플래그를 표시합니다.
-2. **태그와 별칭이 전부다.** 이것이 임베딩 없이 검색이 작동하는 방식입니다. LLM이 임베딩 모델을 대신해 저장 시점에 의미론적 이해를 제공합니다.
-3. **배우기 전에 검색하세요.** 중복을 피하기 위해 항상 `orag learn` 전에 `orag search`를 하세요.
-4. **컨텍스트는 비싸다.** 모든 출력은 기본적으로 간결합니다. `--json` 모드는 불필요한 토큰 낭비 없이 구조화된 데이터를 반환합니다.
-5. **파일이 진실이다.** 순수 마크다운은 지식 베이스를 `git commit`, `grep`, `cat`할 수 있다는 뜻입니다. 마이그레이션은 파일 복사로 끝납니다.
-
-## MCP 서버
-
-orag는 직접적인 에이전트 통합을 위한 내장 MCP (Model Context Protocol) 서버를 포함합니다.
-bash 도구가 필요 없습니다 -- 에이전트가 orag를 네이티브 도구로 호출합니다.
+Frontmatter cannot be changed with `edit`. Use `meta` instead:
 
 ```bash
-pip install orag[serve]   # MCP 지원과 함께 설치
-
-orag serve                        # 자율 모드로 시작 (stdio)
-orag serve --mode readonly        # 읽기 전용 (CS 봇)
-orag serve --mode managed         # 확인과 함께 쓰기 (CS 관리자)
-orag serve --mode autonomous      # 전체 액세스 (개인 비서)
+ohkb meta "python/free-threaded-python.md" --add-tags "verified,python-3.13"
+ohkb meta "python/free-threaded-python.md" --add-aliases "free-threaded CPython"
+ohkb meta "python/free-threaded-python.md" --title "Free-threaded CPython"
+ohkb meta "python/free-threaded-cpython.md" --category "python/runtime"
 ```
 
-### 에이전트 설정
+Changing the title or category relocates the file and removes the previous path. A conflicting destination is rejected rather than overwritten.
+
+## Archiving and restoring
+
+`forget` is a reversible archive operation:
+
+```bash
+ohkb forget "python/free-threaded-python.md" --reason "Superseded by a newer entry"
+```
+
+Restore the most recent archive for that path:
+
+```bash
+ohkb restore "python/free-threaded-python.md"
+```
+
+List available archives or restore a specific version:
+
+```bash
+ohkb restore --list
+ohkb restore "python/free-threaded-python.md" --list
+ohkb restore --archive "python/free-threaded-python__20260813T120000000000Z.md"
+```
+
+If the same path is archived more than once, ohkb keeps timestamped versions instead of replacing the previous archive.
+
+## Working with local source files
+
+The optional `sources/` directory keeps copies of raw local material separately from curated knowledge:
+
+```bash
+ohkb source add ./research-notes.txt
+ohkb source list
+```
+
+`extract` returns text from a local text or HTML file so an agent can review, classify, and store useful facts:
+
+```bash
+ohkb extract ./research-notes.txt --json
+```
+
+A typical intake flow is:
+
+```text
+source add → extract → review and classify → search for duplicates → learn
+```
+
+Extraction is local and deterministic. It does not summarize content, call a model, or fetch URLs. Binary formats such as PDF, DOCX, images, and ZIP files must be converted to text first. Individual extraction targets are limited to 10 MiB; copied source files are limited to 100 MiB.
+
+## Files are the source of truth
+
+ohkb writes the Markdown file first and then updates SQLite. The database can always be reconstructed from `wiki/`:
+
+```bash
+ohkb reindex
+```
+
+This matters when entries are edited with another tool or restored from version control. `status` reports whether the files and index agree:
+
+```bash
+ohkb status --json
+```
+
+If `in_sync` is `false`, run `ohkb reindex`. `lint` provides a more detailed health check and can report:
+
+- files missing from the index;
+- indexed paths with no file on disk;
+- invalid frontmatter;
+- missing tags or aliases;
+- category and filename mismatches;
+- oversized entries.
+
+## MCP server
+
+Install the `serve` extra, then configure an MCP client to start ohkb over stdio:
 
 ```json
-// Claude Code (.mcp.json) / Cursor (.cursor/mcp.json)
 {
   "mcpServers": {
-    "orag": { "command": "orag", "args": ["serve"] }
+    "ohkb": {
+      "command": "ohkb",
+      "args": ["serve", "--mode", "managed"]
+    }
   }
 }
 ```
 
-```jsonc
-// OpenCode (opencode.jsonc)
-{
-  "mcp": {
-    "orag": { "type": "local", "command": ["orag", "serve"] }
-  }
-}
-```
+The executable must be available in the MCP client's environment. The server is local stdio only; ohkb does not expose an HTTP transport.
 
-### 세 가지 모드
+### Access modes
 
-| 모드 | 도구 | 사용 사례 |
-|------|-------|----------|
-| `readonly` | search, get, tree, status, lint | CS 봇 -- KB에서 질문에 답변 |
-| `managed` | + learn, edit, meta, forget (확인 포함) | CS 관리자 -- 지식 큐레이션 |
-| `autonomous` | + learn, edit, meta, forget (즉시) | 개인 비서 -- 전체 제어 |
-
-### 작동 방식
-
-1. 에이전트가 `orag://index` 리소스를 읽어 KB 구조 파악
-2. `search`를 사용하여 관련 항목 검색
-3. `get`을 사용하여 전체 내용 읽기 (크기 인식을 위한 문자 수 포함)
-4. 쓰기 모드에서: 필요에 따라 항목 생성, 편집, 보관
-5. `_index.md`는 모든 변경 후 자동 갱신
-
-## 에이전트 개발자를 위한 안내
-
-orag는 bash 또는 MCP를 통해 LLM 에이전트에서 호출되도록 설계되었습니다. 일반적인 CLI 워크플로우:
+| Mode | Behavior |
+|------|----------|
+| `readonly` | Read, search, inspect, extract, and rebuild the local index |
+| `managed` | Adds write tools and asks the client for confirmation before changes |
+| `autonomous` | Makes write tools available without confirmation prompts |
 
 ```bash
-# 에이전트가 무언가를 기억하려 할 때
-orag search "관련 키워드"                     # 중복 확인
-orag learn "사실" -t "제목" -c cat \
-  --tags "t1,t2" --aliases "a1,a2"            # 새로운 경우 저장
-
-# 에이전트가 기억을 되살릴 때
-orag search "query" --json                    # 구조화된 결과
-orag get "category/file.md" --json            # 문자 수와 함께 전체 내용
-
-# 에이전트가 지식을 업데이트할 때
-orag edit "category/file.md" --line 5 "수정된 정보"
-orag meta "category/file.md" --add-tags "verified"
+ohkb serve --mode readonly
+ohkb serve --mode managed
+ohkb serve --mode autonomous
 ```
 
-모든 명령은 성공 시 종료 코드 0, 실패 시 0이 아닌 코드를 반환합니다. `--json` 출력은 항상 유효한 JSON입니다.
+Available MCP features include:
 
-## 로드맵
+- resource: `ohkb://index`;
+- prompts: `research`, `learn_from_text`, and `organize`;
+- read tools: `index`, `search`, `get`, `tree`, `status`, `lint`, `reindex`, `log`, `related`, `extract`, `source_list`;
+- write tools: `learn`, `edit`, `meta`, `forget`, `restore`, `source_add`.
 
-- [x] 핵심 CLI (search, learn, get, edit, meta, forget, tree, status, lint)
-- [x] MCP 서버 (`orag serve`) 세 가지 모드 포함
-- [x] KB 탐색을 위한 자동 생성 `_index.md`
-- [ ] 구조화된 데이터 테이블 (`orag db exec/query/schema`)
-- [ ] 문서 & URL 추출 유틸리티 (`orag learn-util`)
-- [ ] 자기 진화 지식 (자동 병합, 자동 분할, 오래됨 감지)
-- [ ] 웹 UI (`orag web`)
+See [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md) for parameters and return values.
 
-## 라이선스
+## Data directory
+
+By default, all state is stored under `~/.ohkb`:
+
+```text
+~/.ohkb/
+├── _meta.db           # SQLite metadata and FTS5 index
+├── wiki/
+│   ├── _index.md      # generated summary
+│   └── <category>/
+│       └── <slug>.md  # knowledge entries
+├── sources/           # optional raw local files
+├── archive/           # versioned forgotten entries
+├── log.md             # append-only activity log
+└── AGENTS.ohkb.md     # generated agent workflow guide
+```
+
+Use `OHKB_DIR` to keep separate knowledge bases or place the data elsewhere:
+
+```bash
+export OHKB_DIR="$PWD/.ohkb"
+ohkb init
+```
+
+The directory is portable. It can be backed up, searched with standard tools, or placed under version control according to your own data policy. `_meta.db` does not need to be preserved if the Markdown files are available.
+
+## CLI reference
+
+| Command | Purpose |
+|---------|---------|
+| `ohkb index` | Show the generated knowledge summary |
+| `ohkb search QUERY` | Search with optional category and result limit |
+| `ohkb get PATH` | Read an entry with line numbers |
+| `ohkb tree [PATH]` | Browse categories to a chosen depth |
+| `ohkb status` | Show counts, categories, and index sync state |
+| `ohkb lint` | Check metadata quality and file/index integrity |
+| `ohkb related PATH` | Find entries that share tags |
+| `ohkb log` | Show recent activity |
+| `ohkb learn [CONTENT]` | Create an entry; content may also come from `--file` |
+| `ohkb edit PATH` | Replace, insert, or delete body lines |
+| `ohkb meta PATH` | Update tags, aliases, title, category, or entity type |
+| `ohkb forget PATH` | Move an entry to the versioned archive |
+| `ohkb restore [PATH]` | List or restore archived entries |
+| `ohkb reindex` | Rebuild SQLite from Markdown files |
+| `ohkb source add/list` | Manage optional raw local sources |
+| `ohkb extract TARGET` | Extract text from a local text or HTML file |
+| `ohkb init` | Create the standard data layout and agent guide |
+| `ohkb serve` | Start the optional local MCP server |
+
+Run `ohkb COMMAND --help` for complete options. Successful commands exit with status `0`; errors are written to stderr. Commands that offer `--json` keep stdout machine-readable.
+
+## Scope
+
+ohkb is deliberately limited. The core project does not include:
+
+- model invocation or autonomous knowledge generation;
+- embeddings or vector search;
+- URL crawling and document ingestion pipelines;
+- automatic merging, splitting, or staleness decisions;
+- a web or HTTP runtime.
+
+Those boundaries keep the storage format understandable and the tool contract predictable. Planned work is tracked in the [roadmap](docs/ROADMAP.md).
+
+## Development
+
+Clone the repository and install the development environment:
+
+```bash
+git clone https://github.com/otofu-git/ohkb.git
+cd ohkb
+uv sync --extra dev
+```
+
+Run the checks:
+
+```bash
+uv run pytest
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv build
+```
+
+The test suite uses real temporary filesystems and SQLite databases rather than mocks. See [AGENTS.md](AGENTS.md) for the architecture, invariants, and contribution guidelines used in this repository.
+
+## Version
+
+Current release: **0.1.0**
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and compatibility milestones.
+
+## License
 
 [MIT](LICENSE)

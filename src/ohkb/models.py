@@ -1,4 +1,4 @@
-"""Data models for orag knowledge entries."""
+"""Data models for ohkb knowledge entries."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+
+MAX_SLUG_BYTES = 180
 
 
 @dataclass
@@ -26,16 +28,18 @@ class Entry:
 
     @property
     def slug(self) -> str:
-        """Generate a filename slug from the title."""
-        s = self.title.lower().strip()
-        s = re.sub(r"[^\w\s-]", "", s)
-        s = re.sub(r"[\s_]+", "-", s)
-        s = re.sub(r"-+", "-", s).strip("-")
-        return s or "untitled"
+        """Generate a bounded filesystem slug from the title."""
+        value = self.title.lower().strip()
+        value = re.sub(r"[^\w\s-]", "", value)
+        value = re.sub(r"[\s_]+", "-", value)
+        value = re.sub(r"-+", "-", value).strip("-") or "untitled"
+        return value.encode("utf-8")[:MAX_SLUG_BYTES].decode("utf-8", errors="ignore") or "untitled"
 
     @property
     def filename(self) -> str:
-        """Return the relative path: category/slug.md"""
+        """Return the canonical relative path: category/slug.md."""
+        if not isinstance(self.category, str) or not self.category.strip():
+            raise ValueError("Category must not be empty.")
         return f"{self.category}/{self.slug}.md"
 
     def to_markdown(self) -> str:
@@ -55,34 +59,53 @@ class Entry:
 
     @classmethod
     def from_markdown(cls, text: str, category: str | None = None) -> Entry:
-        """Parse a Markdown file with YAML frontmatter into an Entry."""
+        """Parse a Markdown file with validated YAML frontmatter fields."""
         match = re.match(r"^---\n(.+?)\n---\n\n?(.*)", text, re.DOTALL)
         if not match:
             raise ValueError("Invalid frontmatter format")
 
         meta = yaml.safe_load(match.group(1))
+        if not isinstance(meta, dict):
+            raise ValueError("Frontmatter must be a mapping.")
         content = match.group(2).rstrip("\n")
 
+        parsed_category = category if category is not None else _string_field(meta, "category", "")
         return cls(
-            title=meta.get("title", ""),
-            category=category or meta.get("category", ""),
+            title=_string_field(meta, "title", ""),
+            category=parsed_category,
             content=content,
-            tags=meta.get("tags", []),
-            aliases=meta.get("aliases", []),
-            entity_type=meta.get("entity_type", "concept"),
-            source=meta.get("source", "manual"),
+            tags=_string_list(meta, "tags"),
+            aliases=_string_list(meta, "aliases"),
+            entity_type=_string_field(meta, "entity_type", "concept"),
+            source=_string_field(meta, "source", "manual"),
             created=_parse_dt(meta.get("created")),
             updated=_parse_dt(meta.get("updated")),
         )
 
 
-def _parse_dt(val: Any) -> datetime:
+def _string_field(meta: dict[str, Any], key: str, default: str) -> str:
+    value = meta.get(key, default)
+    if not isinstance(value, str):
+        raise ValueError(f"Frontmatter field '{key}' must be a string.")
+    return value
+
+
+def _string_list(meta: dict[str, Any], key: str) -> list[str]:
+    value = meta.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"Frontmatter field '{key}' must be a list of strings.")
+    return value
+
+
+def _parse_dt(value: Any) -> datetime:
     """Parse a datetime from string or return current UTC time."""
-    if isinstance(val, datetime):
-        return val
-    if isinstance(val, str):
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
         try:
-            return datetime.fromisoformat(val)
+            return datetime.fromisoformat(value)
         except ValueError:
             pass
     return datetime.now(timezone.utc)
