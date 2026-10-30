@@ -9,7 +9,14 @@ ohkb does not call models. Files are truth; FTS5 is a rebuildable index.
 
 ---
 
-## 0.1.0 — Core (current)
+## 0.2.0 — Search tokens (current)
+
+| Area | Contents |
+|------|----------|
+| Search | Hangul/Kana/Han character bigrams + whole words; OR query ranked by weighted BM25 (no AND, prefix, or 5-result fallback cap) |
+| Index | Search-token columns (schema 2); 0.1.0 databases migrate on first open; updates no longer leave stale index rows |
+
+## 0.1.0 — Core
 
 | Area | Contents |
 |------|----------|
@@ -50,7 +57,8 @@ Documentation-only exploration. No Web or HTTP runtime is shipped. Any implement
 | Line | Meaning |
 |------|---------|
 | **0.1.x** | Core KB + MCP + lifecycle helpers |
-| **0.2.x** | First major additive (likely `db`) |
+| **0.2.x** | Search tokens (schema 2) |
+| **0.3.x** | First major additive (likely `db`) |
 | **1.0** | Stable CLI/MCP contract |
 
 Keep `pyproject.toml` version and `ohkb.__version__` identical.

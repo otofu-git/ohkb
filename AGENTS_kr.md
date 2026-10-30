@@ -4,7 +4,7 @@ English: [AGENTS.md](AGENTS.md)
 
 > **ohkb** — 에이전트를 위한 간단한 로컬 지식 베이스.
 > 임베딩 없음. 벡터 DB 없음. **ohkb는 모델을 호출하지 않음.**
-> Markdown + SQLite FTS5. 버전 **0.1.0**.
+> Markdown + SQLite FTS5. 버전 **0.2.0**.
 
 이 파일은 **이 저장소에서 작업하는 에이전트**를 위한 소스 오브 트루스입니다.
 

@@ -80,7 +80,7 @@ ohkb uses a four-layer design. CLI and MCP call only `KnowledgeBase` — never s
 ### 3. Data (`wiki.py` + `store.py`)
 
 - **wiki:** save/read/edit/archive/restore/relocate, tree, sources helpers
-- **store:** entries + FTS5 triggers, BM25, schema version + migrations
+- **store:** entries + search-token columns, FTS5 triggers, BM25, schema version + migrations
 
 ### 4. Foundation (`models.py` + `config.py`)
 
@@ -99,6 +99,11 @@ self._store.upsert(entry)         # then FTS
 ```python
 _BM25_WEIGHTS = (10.0, 5.0, 3.0, 1.0)  # title, tags, aliases, content
 ```
+
+`search_tokens()` turns Hangul/Kana/Han runs into character bigrams and keeps other words
+whole. The tokens live in `title_tokens`, `tags_tokens`, `aliases_tokens`, and `content_tokens`,
+which `entries_fts` indexes. A query matches if any of its tokens matches (OR) and is ranked by
+weighted `bm25()`.
 
 Callers see a relative `score` in 0..1. Category filter uses prefix match.
 

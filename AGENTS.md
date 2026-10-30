@@ -4,7 +4,7 @@ Korean: [AGENTS_kr.md](AGENTS_kr.md)
 
 > **ohkb** — simple local knowledge base for agents.
 > No embeddings. No vector DB. **ohkb never calls models.**
-> Markdown files + SQLite FTS5. Version **0.1.0**.
+> Markdown files + SQLite FTS5. Version **0.2.0**.
 
 This file is the source of truth for agents working **in this repository**.
 
@@ -48,7 +48,7 @@ src/ohkb/
   config.py       # OHKB_DIR / paths
   index.py        # Auto _index.md
 tests/
-  test_kb.py test_basic.py test_index.py test_lifecycle.py test_serve.py
+  test_kb.py test_basic.py test_index.py test_lifecycle.py test_serve.py test_store.py
 ```
 
 ---
@@ -57,7 +57,7 @@ tests/
 
 ```bash
 uv sync --extra dev
-uv run ohkb --version          # 0.1.0
+uv run ohkb --version          # 0.2.0
 pytest
 ruff check src/ tests/
 ruff format src/ tests/
@@ -91,7 +91,7 @@ Never call `wiki`/`store` from presentation without `KnowledgeBase`.
 
 ---
 
-## CLI (0.1.0)
+## CLI (0.2.0)
 
 | Command | Role |
 |---------|------|
@@ -113,7 +113,7 @@ Exit `0` on success; `--json` stdout is always valid JSON.
 
 ---
 
-## MCP (0.1.0)
+## MCP (0.2.0)
 
 | Mode | Tools |
 |------|--------|
@@ -132,7 +132,11 @@ Resource: `ohkb://index`. Prompts: `research`, `learn_from_text`, `organize`.
 _BM25_WEIGHTS = (10.0, 5.0, 3.0, 1.0)  # title, tags, aliases, content
 ```
 
-- Tokens FTS5-escaped, AND + prefix `*`; OR fallback if empty (capped).
+- `search_tokens()` (store.py): Hangul/Kana/Han runs → character bigrams, other words whole
+  and lowercased. Stored in `*_tokens` columns; FTS5 indexes those (schema 2).
+- Query: distinct tokens, each quoted, joined with OR, ranked by weighted `bm25()`.
+  No AND, no prefix `*`, no fallback cap beyond `limit`.
+- Changing `search_tokens()` changes the index: bump `SCHEMA_VERSION` with a rebuild migration.
 - Relative `score` in 0..1.
 - Category filter is **prefix** (`python` ⊇ `python/internals`).
 - Prefer 3–7 tags and real aliases on every `learn`.
@@ -196,7 +200,7 @@ Nested categories are first-class (`python/internals/gil.md`).
 - Leave orphan files after path-changing ops.
 - Expand into roadmap features without a request.
 
-**Out of scope for 0.1.0 core**
+**Out of scope for the 0.2.0 core**
 
 - Structured `ohkb db` tables
 - Document/URL ingest pipelines that own compilation

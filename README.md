@@ -189,7 +189,7 @@ Search uses SQLite FTS5 and BM25. Fields are weighted in this order:
 title > tags > aliases > content
 ```
 
-Search terms use prefix matching and are combined strictly first, with a bounded broader fallback when necessary. Results include a relative score from `0` to `1`; the score is meaningful within that result set rather than as a global relevance value.
+ohkb indexes its own search tokens. Korean, Japanese, and Chinese text is split into overlapping two-character pieces (`중소기업` → `중소 소기 기업`); other words are kept whole and lowercased. Any query token can match, and entries that match more of the query rank higher, so particles and spacing (`요금제를`, `중소 기업`) do not prevent a match. Results include a relative score from `0` to `1`; the score is meaningful within that result set rather than as a global relevance value.
 
 ```bash
 ohkb search "python gil"
@@ -428,7 +428,7 @@ The test suite uses real temporary filesystems and SQLite databases rather than 
 
 ## Version
 
-Current release: **0.1.0**
+Current release: **0.2.0**
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and compatibility milestones.
 

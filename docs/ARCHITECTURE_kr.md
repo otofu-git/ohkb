@@ -105,10 +105,11 @@ self._store.upsert(entry)               # 그 다음 FTS5
 - `update_frontmatter`: 메타데이터 업데이트, 카테고리 변경 시 파일 이동 + 빈 디렉토리 정리
 
 **store.py** — SQLite FTS5 색인
-- `entries` 테이블 (primary): path, title, category, tags, aliases, entity_type, source, created, updated, content
-- `entries_fts` 가상 테이블 (FTS5): `content=entries`로 연결, 3개 트리거(INSERT/DELETE/UPDATE)로 동기화
-- `upsert`: `INSERT OR REPLACE`로 원자적 업데이트
-- `search`: BM25 가중치 랭킹, 카테고리 prefix LIKE 매칭 지원
+- `entries` 테이블 (primary): path, title, category, tags, aliases, entity_type, source, created, updated, content + 검색 토큰 4열(`*_tokens`)
+- `entries_fts` 가상 테이블 (FTS5): `*_tokens` 열을 `content=entries`로 색인, 3개 트리거(INSERT/DELETE/UPDATE)로 동기화
+- `search_tokens`: 한글·가나·한자 연속 구간은 두 글자씩 겹쳐 자르고(bigram), 나머지 단어는 소문자 단어 그대로
+- `upsert`: 한 트랜잭션에서 DELETE 후 INSERT (`INSERT OR REPLACE`는 삭제 트리거를 실행하지 않아 색인에 이전 행이 남는다)
+- `search`: 검색어 토큰을 OR로 묶고 BM25 가중치로 랭킹, 카테고리 prefix LIKE 매칭 지원
 - WAL 모드, lazy connection 초기화
 
 ### 4. Foundation Layer (models.py + config.py)
@@ -170,15 +171,22 @@ CREATE TABLE entries (
     source      TEXT NOT NULL,
     created     TEXT NOT NULL,
     updated     TEXT NOT NULL,
-    content     TEXT NOT NULL
+    content     TEXT NOT NULL,
+    -- search_tokens() 결과 (공백 구분). entries_fts는 이 열들을 색인한다.
+    title_tokens   TEXT NOT NULL,
+    tags_tokens    TEXT NOT NULL,
+    aliases_tokens TEXT NOT NULL,
+    content_tokens TEXT NOT NULL
 );
 
 CREATE VIRTUAL TABLE entries_fts USING fts5(
-    title, tags, aliases, content,
+    title_tokens, tags_tokens, aliases_tokens, content_tokens,
     content=entries,              -- content table 참조
     content_rowid=rowid
 );
 ```
+
+스키마 버전은 2입니다. 0.1.0이 만든 스키마 1 DB는 처음 열 때 토큰 열을 채우고 색인을 다시 만듭니다.
 
 ### BM25 가중치
 

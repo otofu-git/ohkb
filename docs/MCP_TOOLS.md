@@ -34,7 +34,7 @@ KB structure summary (Markdown). Read this first. Auto-refreshed after writes.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `query` | string | yes | Keywords (FTS5-escaped) |
+| `query` | string | yes | Question or keywords; any word can match, ranked by BM25 |
 | `category` | string | no | Category prefix filter |
 | `limit` | int | no | Max results (default 20) |
 

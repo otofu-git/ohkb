@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ohkb.config import get_db_path
@@ -14,17 +16,79 @@ from ohkb.models import Entry
 # title matches are the strongest signal; raw body content the weakest.
 _BM25_WEIGHTS = (10.0, 5.0, 3.0, 1.0)
 
+# ── Search tokens ───────────────────────────────────────────────────────────
+#
+# SQLite's unicode61 tokenizer keeps a Korean word together with its particles
+# and endings ("요금제를", "요금제는"), so a query word rarely equals an indexed
+# token.  ohkb therefore indexes its own tokens:
+#
+#   - Hangul, Kana and Han runs become overlapping character bigrams
+#     ("중소기업" → 중소 소기 기업); a one-character run stays a unigram.
+#   - Numbers stay whole, including inner "." and "," ("1,000", "3.5").
+#   - Other letters (Latin, Cyrillic, Greek, ...) form lowercased whole words.
+#
+# Everything else separates tokens, including Hangul jamo used as bullets or
+# separators (ㅇ, ㆍ) and number-like symbols (①, Ⅱ, ²).  The tokens are stored
+# space-separated in the *_tokens columns, and FTS5 indexes those columns with
+# its default unicode61 tokenizer.
+
+_HANGUL = "\uac00-\ud7a3"  # Hangul syllables 가-힣
+_CJK = (
+    "\u3041-\u3096\u309d-\u309f"  # Hiragana
+    "\u30a1-\u30fa\u30fc-\u30ff\u31f0-\u31ff\uff66-\uff9d"  # Katakana (full and half width)
+    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f"  # Han ideographs
+)
+_NOT_WORD = (
+    "\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\ud7b0-\ud7ff\uffa0-\uffdc"  # Hangul jamo
+    "\u3040-\u30ff\u31f0-\u31ff\uff65-\uff9f"  # rest of the Kana blocks
+    "\u00b2\u00b3\u00b9\u00bc-\u00be\u2070-\u209f\u2150-\u218f"  # super/subscripts, Roman numerals
+    "\u2460-\u24ff\u2776-\u2793\u3220-\u325f\u3280-\u32bf"  # circled and parenthesized numbers
+)
+_TOKEN_RE = re.compile(
+    rf"(?P<bigram>[{_HANGUL}]+|[{_CJK}]+)"
+    r"|(?P<number>\d+(?:[.,]\d+)*)"
+    rf"|(?P<word>[^\W\d_{_HANGUL}{_CJK}{_NOT_WORD}]+)"
+)
+
+
+def search_tokens(text: str) -> list[str]:
+    """Split text into the tokens that ohkb indexes and matches queries against.
+
+    Examples:
+        "중소기업 지원"   → ["중소", "소기", "기업", "지원"]
+        "AI 바우처 3.5억" → ["ai", "바우", "우처", "3.5", "억"]
+    """
+    tokens: list[str] = []
+    for match in _TOKEN_RE.finditer(unicodedata.normalize("NFC", text)):
+        run = match.group()
+        if match.lastgroup == "bigram":
+            if len(run) == 1:
+                tokens.append(run)
+            else:
+                tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+        else:
+            tokens.append(run.lower())
+    return tokens
+
+
+def _token_text(parts: Iterable[str]) -> str:
+    """Search tokens of several strings, space-separated for the FTS5 column."""
+    return " ".join(token for part in parts for token in search_tokens(part))
+
+
+def _index_columns(
+    title: str, tags: Iterable[str], aliases: Iterable[str], content: str
+) -> tuple[str, str, str, str]:
+    """Values for (title_tokens, tags_tokens, aliases_tokens, content_tokens)."""
+    return _token_text([title]), _token_text(tags), _token_text(aliases), _token_text([content])
+
+
+# ── Schema ──────────────────────────────────────────────────────────────────
+
 # Schema version — bump when migrations are added below.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# Migrations keyed by *target* version (applied when upgrading from N-1 → N).
-# Each callable receives an open sqlite3.Connection and must not commit.
-_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
-    # Example:
-    # 2: lambda conn: conn.execute("ALTER TABLE entries ADD COLUMN foo TEXT"),
-}
-
-_CREATE_TABLES = """
+_CREATE_ENTRIES = """
 CREATE TABLE IF NOT EXISTS entries (
     path        TEXT PRIMARY KEY,   -- category/slug.md
     title       TEXT NOT NULL,
@@ -35,37 +99,92 @@ CREATE TABLE IF NOT EXISTS entries (
     source      TEXT NOT NULL DEFAULT 'manual',
     created     TEXT NOT NULL,
     updated     TEXT NOT NULL,
-    content     TEXT NOT NULL DEFAULT ''
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-    title, tags, aliases, content,
-    content=entries,
-    content_rowid=rowid
-);
-
--- Triggers to keep FTS in sync
-CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
-    INSERT INTO entries_fts(rowid, title, tags, aliases, content)
-    VALUES (new.rowid, new.title, new.tags, new.aliases, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
-    INSERT INTO entries_fts(entries_fts, rowid, title, tags, aliases, content)
-    VALUES ('delete', old.rowid, old.title, old.tags, old.aliases, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
-    INSERT INTO entries_fts(entries_fts, rowid, title, tags, aliases, content)
-    VALUES ('delete', old.rowid, old.title, old.tags, old.aliases, old.content);
-    INSERT INTO entries_fts(rowid, title, tags, aliases, content)
-    VALUES (new.rowid, new.title, new.tags, new.aliases, new.content);
-END;
-
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL
-);
+    content     TEXT NOT NULL DEFAULT '',
+    -- search_tokens() of the fields above; entries_fts indexes these columns
+    title_tokens   TEXT NOT NULL DEFAULT '',
+    tags_tokens    TEXT NOT NULL DEFAULT '',
+    aliases_tokens TEXT NOT NULL DEFAULT '',
+    content_tokens TEXT NOT NULL DEFAULT ''
+)
 """
+
+_TOKEN_COLUMNS = ("title_tokens", "tags_tokens", "aliases_tokens", "content_tokens")
+
+# The trigger names match 0.1.0's, so 0.1.0's CREATE TRIGGER IF NOT EXISTS is a
+# no-op on a migrated database before it refuses the newer schema version.
+_CREATE_FTS = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+        title_tokens, tags_tokens, aliases_tokens, content_tokens,
+        content=entries,
+        content_rowid=rowid
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+        INSERT INTO entries_fts(rowid, title_tokens, tags_tokens, aliases_tokens, content_tokens)
+        VALUES (new.rowid, new.title_tokens, new.tags_tokens, new.aliases_tokens,
+                new.content_tokens);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+        INSERT INTO entries_fts(entries_fts, rowid, title_tokens, tags_tokens, aliases_tokens,
+                                content_tokens)
+        VALUES ('delete', old.rowid, old.title_tokens, old.tags_tokens, old.aliases_tokens,
+                old.content_tokens);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+        INSERT INTO entries_fts(entries_fts, rowid, title_tokens, tags_tokens, aliases_tokens,
+                                content_tokens)
+        VALUES ('delete', old.rowid, old.title_tokens, old.tags_tokens, old.aliases_tokens,
+                old.content_tokens);
+        INSERT INTO entries_fts(rowid, title_tokens, tags_tokens, aliases_tokens, content_tokens)
+        VALUES (new.rowid, new.title_tokens, new.tags_tokens, new.aliases_tokens,
+                new.content_tokens);
+    END
+    """,
+)
+
+_CREATE_SCHEMA_VERSION = "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
+
+
+def _migrate_to_search_tokens(conn: sqlite3.Connection) -> None:
+    """Schema 2: index search_tokens() columns instead of raw text.
+
+    Schema 1 indexed the raw fields with unicode61 and matched AND-ed prefix
+    queries.  The index is rebuilt from the entries table, which also drops
+    rows that schema 1 left behind when INSERT OR REPLACE skipped its delete
+    trigger.
+    """
+    for trigger in ("entries_ai", "entries_ad", "entries_au"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    conn.execute("DROP TABLE IF EXISTS entries_fts")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+    for column in _TOKEN_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE entries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    rows = conn.execute("SELECT rowid, title, tags, aliases, content FROM entries").fetchall()
+    conn.executemany(
+        "UPDATE entries SET title_tokens = ?, tags_tokens = ?, aliases_tokens = ?,"
+        " content_tokens = ? WHERE rowid = ?",
+        [
+            (*_index_columns(title, tags.split(","), aliases.split(","), content), rowid)
+            for rowid, title, tags, aliases, content in rows
+        ],
+    )
+    for statement in _CREATE_FTS:
+        conn.execute(statement)
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')")
+
+
+# Migrations keyed by *target* version (applied when upgrading from N-1 → N).
+# Each callable receives an open sqlite3.Connection and must not commit.
+_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_to_search_tokens,
+}
 
 
 class Store:
@@ -78,42 +197,81 @@ class Store:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._init_schema()
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._conn = conn
+            try:
+                self._init_schema()
+            except BaseException:
+                # Do not keep a connection whose schema was not checked or migrated.
+                self._conn = None
+                conn.close()
+                raise
         return self._conn
 
+    def _schema_version(self) -> int | None:
+        """Stored schema version; None for a database without one."""
+        try:
+            row = self.conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                return None
+            raise
+        return int(row[0]) if row else None
+
+    @staticmethod
+    def _check_not_newer(version: int | None) -> None:
+        if version is not None and version > SCHEMA_VERSION:
+            # Newer DB opened by older code — refuse to write silently.
+            raise RuntimeError(
+                f"Database schema version {version} is newer than this ohkb "
+                f"supports ({SCHEMA_VERSION}). Upgrade ohkb to continue."
+            )
+
     def _init_schema(self) -> None:
-        """Create tables if needed and apply pending migrations."""
-        self.conn.executescript(_CREATE_TABLES)
-        row = self.conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
-        if row is None:
+        """Create tables if needed and apply pending migrations.
+
+        Schema changes run in one IMMEDIATE transaction. Processes that open
+        the same database at the same time wait for the first one and then
+        find the work done.
+        """
+        version = self._schema_version()
+        self._check_not_newer(version)
+        if version == SCHEMA_VERSION:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            version = self._schema_version()
+            self._check_not_newer(version)
+            if version is None:
+                has_entries = self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'"
+                ).fetchone()
+                # A database that has entries but no version predates versioning: schema 1.
+                version = 1 if has_entries else 0
+            if version == 0:
+                for statement in (_CREATE_ENTRIES, *_CREATE_FTS, _CREATE_SCHEMA_VERSION):
+                    self.conn.execute(statement)
+            elif version < SCHEMA_VERSION:
+                self.conn.execute(_CREATE_SCHEMA_VERSION)
+                self._migrate(version)
+            self.conn.execute("DELETE FROM schema_version")
             self.conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
             )
             self.conn.commit()
-            return
-
-        current = int(row[0])
-        if current > SCHEMA_VERSION:
-            # Newer DB opened by older code — refuse to write silently.
-            raise RuntimeError(
-                f"Database schema version {current} is newer than this ohkb "
-                f"supports ({SCHEMA_VERSION}). Upgrade ohkb to continue."
-            )
-        if current < SCHEMA_VERSION:
-            self._migrate(current)
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def _migrate(self, from_version: int) -> None:
-        """Apply migrations from from_version up to SCHEMA_VERSION."""
+        """Apply migrations from from_version up to SCHEMA_VERSION (caller commits)."""
         for target in range(from_version + 1, SCHEMA_VERSION + 1):
             migrate_fn = _MIGRATIONS.get(target)
             if migrate_fn is not None:
                 migrate_fn(self.conn)
-            self.conn.execute("UPDATE schema_version SET version = ?", (target,))
-        self.conn.commit()
 
     def upsert(self, entry: Entry) -> None:
         """Insert or replace an entry in the index at entry.filename."""
@@ -123,28 +281,33 @@ class Store:
         """Insert or replace an entry at an explicit index path.
 
         Used by reindex when the on-disk filename may not match the title slug.
+        Replacing is DELETE + INSERT so the delete trigger removes the old
+        index row (INSERT OR REPLACE does not fire delete triggers).
         """
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO entries
-                (path, title, category, tags, aliases, entity_type, source, created, updated,
-                 content)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                path,
-                entry.title,
-                entry.category,
-                ",".join(entry.tags),
-                ",".join(entry.aliases),
-                entry.entity_type,
-                entry.source,
-                entry.created.isoformat(),
-                entry.updated.isoformat(),
-                entry.content,
-            ),
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("DELETE FROM entries WHERE path = ?", (path,))
+            self.conn.execute(
+                """
+                INSERT INTO entries
+                    (path, title, category, tags, aliases, entity_type, source, created,
+                     updated, content, title_tokens, tags_tokens, aliases_tokens,
+                     content_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    path,
+                    entry.title,
+                    entry.category,
+                    ",".join(entry.tags),
+                    ",".join(entry.aliases),
+                    entry.entity_type,
+                    entry.source,
+                    entry.created.isoformat(),
+                    entry.updated.isoformat(),
+                    entry.content,
+                    *_index_columns(entry.title, entry.tags, entry.aliases, entry.content),
+                ),
+            )
 
     def delete(self, path: str) -> None:
         """Remove an entry from the index."""
@@ -153,8 +316,10 @@ class Store:
 
     def clear_all(self) -> None:
         """Remove every row from the index (used by reindex)."""
-        self.conn.execute("DELETE FROM entries")
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("DELETE FROM entries")
+            # Also drop index rows that no longer have an entries row.
+            self.conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('delete-all')")
 
     def indexed_paths(self) -> set[str]:
         """Return the set of all paths currently in the index."""
@@ -162,112 +327,65 @@ class Store:
         return {row[0] for row in rows}
 
     @staticmethod
-    def _fts5_escape(query: str) -> str:
-        """Escape a raw query string for safe use in FTS5 MATCH.
+    def _fts5_query(query: str) -> str | None:
+        """Build an FTS5 MATCH expression from a raw query; None if it has no tokens.
 
-        FTS5 parses its query syntax before SQLite parameter binding takes
-        effect, so special characters like +, -, (, ), ", * cause parse errors
-        even when passed as bound parameters.
-
-        Each whitespace-separated token is wrapped in double-quotes (making it
-        a safe literal term) and the tokens are joined with AND so that all
-        words must appear somewhere in the document — but not necessarily
-        adjacent or in order.  This matches user intent for multi-word queries
-        like "뷰저블 요금 가격" or "free threaded python".
-
-        A single-token query becomes a plain quoted term.
-
-        Internal double-quote characters are escaped by doubling them per the
-        FTS5 spec.
+        Each distinct search token becomes a quoted literal, and the literals are
+        joined with OR.  Quoting keeps FTS5 syntax characters (+ - ( ) " * :)
+        and keywords (AND, NOT, NEAR) literal.
 
         Examples (input => fts5 query):
-            pricing              =>  "pricing"*
-            뷰저블 요금 가격        =>  "뷰저블"* AND "요금"* AND "가격"*
-            C++                  =>  "C++"*
-            free threaded python =>  "free"* AND "threaded"* AND "python"*
-
-        The prefix wildcard (*) is important for CJK languages: SQLite's default
-        unicode61 tokenizer does not split compound words, so "요금" alone would
-        not match "요금제".  With prefix matching, "요금"* matches any token that
-        starts with "요금", including "요금제", "요금표", etc.
+            요금제 가격      =>  "요금" OR "금제" OR "가격"
+            C++ basics      =>  "c" OR "basics"
         """
-        tokens = query.split()
+        tokens = dict.fromkeys(search_tokens(query))
         if not tokens:
-            return '""'
-        # Each token is wrapped in double-quotes for safety, then given a
-        # trailing * for prefix matching.  This handles languages like Korean
-        # where the default unicode61 tokenizer does not split compound words
-        # (e.g. "요금" prefix-matches "요금제", "요금표", etc.).
-        escaped = ['"' + t.replace('"', '""') + '"*' for t in tokens]
-        return " AND ".join(escaped)
-
-    @staticmethod
-    def _fts5_or(query: str) -> str:
-        """Build an OR query: any token matches (used as fallback)."""
-        tokens = query.split()
-        if not tokens:
-            return '""'
-        escaped = ['"' + t.replace('"', '""') + '"*' for t in tokens]
-        return " OR ".join(escaped)
+            return None
+        return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
     def search(self, query: str, category: str | None = None, limit: int = 20) -> list[dict]:
-        """Full-text search using FTS5 BM25 ranking.
+        """Full-text search ranked by weighted BM25.
 
-        First tries AND (all tokens must match). If no results, falls back to
-        OR (any token matches) so broad queries like 'beusable pricing 가격'
-        still find relevant entries even when no single document contains every word.
+        Any query token may match. Entries that match more of the query, and
+        match it in heavier fields (title > tags > aliases > content), rank
+        higher.  Each row has a ``rank`` key with the raw bm25() value
+        (negative; lower is better).
         """
-        safe_query = self._fts5_escape(query)
+        fts_query = self._fts5_query(query)
+        if fts_query is None:
+            return []
         w = _BM25_WEIGHTS
         bm25_expr = f"bm25(entries_fts, {w[0]}, {w[1]}, {w[2]}, {w[3]})"
-
-        def _run(fts_query: str) -> list:
-            if category:
-                category_prefix = (
-                    category.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
-                )
-                return self.conn.execute(
-                    f"""
-                    SELECT e.path, e.title, e.category, e.tags, e.aliases,
-                           e.entity_type, {bm25_expr} AS rank
-                    FROM entries_fts fts
-                    JOIN entries e ON e.rowid = fts.rowid
-                    WHERE entries_fts MATCH ?
-                      AND (e.category = ? OR e.category LIKE ? ESCAPE '\\')
-                    ORDER BY {bm25_expr}
-                    LIMIT ?
-                    """,
-                    (fts_query, category, category_prefix, limit),
-                ).fetchall()
-            else:
-                return self.conn.execute(
-                    f"""
-                    SELECT e.path, e.title, e.category, e.tags, e.aliases,
-                           e.entity_type, {bm25_expr} AS rank
-                    FROM entries_fts fts
-                    JOIN entries e ON e.rowid = fts.rowid
-                    WHERE entries_fts MATCH ?
-                    ORDER BY {bm25_expr}
-                    LIMIT ?
-                    """,
-                    (fts_query, limit),
-                ).fetchall()
-
-        rows = _run(safe_query)
-
-        # AND returned nothing → fall back to OR so broad queries like
-        # "beusable pricing 가격" still surface relevant entries even when
-        # no single document contains every token.
-        # Returns (rows, or_fallback) so callers can apply stricter filtering.
-        if not rows and " AND " in safe_query:
-            rows = _run(self._fts5_or(query))
-            return [dict(row) for row in rows], True
-
-        return [dict(row) for row in rows], False
+        params: tuple = (fts_query, limit)
+        category_clause = ""
+        if category:
+            category_prefix = (
+                category.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
+            )
+            category_clause = "AND (e.category = ? OR e.category LIKE ? ESCAPE '\\')"
+            params = (fts_query, category, category_prefix, limit)
+        rows = self.conn.execute(
+            f"""
+            SELECT e.path, e.title, e.category, e.tags, e.aliases,
+                   e.entity_type, {bm25_expr} AS rank
+            FROM entries_fts fts
+            JOIN entries e ON e.rowid = fts.rowid
+            WHERE entries_fts MATCH ?
+              {category_clause}
+            ORDER BY {bm25_expr}
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get(self, path: str) -> dict | None:
         """Get a single entry by path."""
-        row = self.conn.execute("SELECT * FROM entries WHERE path = ?", (path,)).fetchone()
+        row = self.conn.execute(
+            "SELECT path, title, category, tags, aliases, entity_type, source, created,"
+            " updated, content FROM entries WHERE path = ?",
+            (path,),
+        ).fetchone()
         return dict(row) if row else None
 
     def list_all(self) -> list[dict]:

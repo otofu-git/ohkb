@@ -130,7 +130,7 @@ def _build_instructions(mode: Mode, index_content: str = "") -> str:
         "         This shows what categories and entries exist in the KB.\n"
         "         Do NOT skip this step even if you think you know the KB.\n\n"
         "STEP 2 — Call 'search' with keywords from the user's question.\n"
-        "         Multi-word queries use AND logic. If no results, try fewer words.\n\n"
+        "         Any query word can match; entries matching more of it rank higher.\n\n"
         "STEP 3 — Call 'get' with the exact path from search results to read full content.\n"
         "         'get' takes a path like 'category/file.md', NOT a search query.\n\n"
     )
@@ -205,13 +205,14 @@ def _register_read_tools(mcp: FastMCP) -> None:
         Example: search("pricing") → result has path "beusable/geo/pricing/geo-요금제.md"
                  → call get(path="beusable/geo/pricing/geo-요금제.md") to read it.
 
-        If no results: retry with fewer or different keywords. Multi-word queries
-        use AND logic — if too specific, try a single keyword instead.
+        If no results: retry with different keywords (synonyms, official names).
+        Any query word can match; entries that match more of the query, especially in
+        title/tags/aliases, rank higher. Korean is matched by character bigrams, so
+        particles and spacing ('요금제를', '중소 기업') do not prevent a match.
         Category filter uses prefix matching: 'python' also returns 'python/internals' entries.
 
         Args:
-            query: Search keywords. Multi-word = AND (all must match). Single word recommended
-                   for broad topics.
+            query: The question or keywords. Words are OR-matched and ranked by BM25.
             category: Optional category prefix to narrow results.
             limit: Maximum number of results (default 20).
         """

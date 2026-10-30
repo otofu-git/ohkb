@@ -69,7 +69,7 @@ class KnowledgeBase:
         if limit < 1 or limit > 100:
             raise ValueError("Limit must be between 1 and 100.")
         try:
-            results, or_fallback = self._store.search(query, category=category, limit=limit)
+            results = self._store.search(query, category=category, limit=limit)
         except sqlite3.OperationalError as e:
             if "no such table" in str(e):
                 return []
@@ -90,10 +90,6 @@ class KnowledgeBase:
             for r in results:
                 r.pop("rank", None)
                 r["score"] = 0.0
-
-        # OR fallback produces noisy low-score results — cap at 5 results.
-        if or_fallback:
-            results = results[:5]
 
         return results
 

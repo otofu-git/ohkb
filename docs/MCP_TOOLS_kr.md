@@ -41,7 +41,7 @@ ohkb serve --mode autonomous  # 즉시 쓰기
 
 | 파라미터 | 타입 | 필수 | 설명 |
 |---------|------|------|------|
-| `query` | string | O | 검색 키워드 (자동 escape, FTS5 특수문자 안전) |
+| `query` | string | O | 질문이나 키워드. 단어 하나만 맞아도 찾고 BM25로 순위를 매김 (FTS5 특수문자 안전) |
 | `category` | string | - | 카테고리 prefix 필터. `"python"`은 `"python/internals"`도 포함 |
 | `limit` | integer | - | 최대 결과 수 (기본 20) |
 

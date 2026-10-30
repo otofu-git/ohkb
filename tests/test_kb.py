@@ -48,7 +48,7 @@ class TestSearch:
         assert all(r["category"] == "cat1" for r in results)
 
     def test_search_multi_word_query(self, kb):
-        """Multi-word query must find entries containing ALL words (AND logic)."""
+        """Multi-word query ranks the entry matching more words first; unrelated entries miss."""
         kb.learn(
             "요금제 안내: 스타터는 무료, 프로는 유료.",
             title="서비스 요금제",
@@ -57,20 +57,27 @@ class TestSearch:
             aliases=["가격표"],
         )
         kb.learn(
+            "스타터 키트 구성품 목록.",
+            title="스타터 키트",
+            category="test",
+            tags=["kit"],
+            aliases=["구성품"],
+        )
+        kb.learn(
             "완전히 다른 내용.",
             title="무관한 항목",
             category="test",
             tags=["other"],
             aliases=["unrelated"],
         )
-        # Both words must appear → only the first entry should match
-        results = kb.search("요금 스타터")
+        results = kb.search("요금제 스타터 가격")
         paths = [r["path"] for r in results]
-        assert "test/서비스-요금제.md" in paths
+        assert paths[0] == "test/서비스-요금제.md"
+        assert "test/스타터-키트.md" in paths  # matches only "스타터": OR, not AND
         assert "test/무관한-항목.md" not in paths
 
-    def test_search_prefix_matches_compound_korean(self, kb):
-        """Prefix matching: searching '요금' should find entries containing '요금제'."""
+    def test_search_matches_korean_compounds_and_particles(self, kb):
+        """Bigram tokens: '요금' finds '요금제', and particles or spacing do not block a match."""
         kb.learn(
             "프로 요금제는 월 9000원입니다.",
             title="요금제 안내",
@@ -78,8 +85,25 @@ class TestSearch:
             tags=["요금제", "pricing"],
             aliases=["가격"],
         )
-        results = kb.search("요금")
-        assert any(r["path"] == "test/요금제-안내.md" for r in results)
+        kb.learn("중소기업 지원 사업 목록.", title="지원 사업", category="test", tags=["지원"])
+        assert kb.search("요금")[0]["path"] == "test/요금제-안내.md"
+        assert kb.search("요금제를 알려줘")[0]["path"] == "test/요금제-안내.md"
+        assert kb.search("중소 기업은?")[0]["path"] == "test/지원-사업.md"
+
+    def test_search_title_outranks_content(self, kb):
+        kb.learn("Unrelated body.", title="Kubernetes", category="test", tags=["infra"])
+        kb.learn("Notes that mention kubernetes once.", title="Notes", category="test", tags=["x"])
+        assert [r["path"] for r in kb.search("kubernetes")] == [
+            "test/kubernetes.md",
+            "test/notes.md",
+        ]
+
+    def test_search_returns_more_than_five_partial_matches(self, kb):
+        """0.1.0 capped OR-fallback results at 5; ranked OR results honor limit instead."""
+        for i in range(8):
+            kb.learn(f"word{i} shared", title=f"Entry {i}", category="test", tags=["t"])
+        assert len(kb.search("shared nothing-else-matches", limit=20)) == 8
+        assert len(kb.search("shared", limit=3)) == 3
 
     def test_search_special_chars_safe(self, kb):
         """Queries with FTS5 special characters (C++, parens) must not raise."""
@@ -89,6 +113,9 @@ class TestSearch:
         # Should not raise OperationalError
         results = kb.search("C++")
         assert any(r["path"] == "test/cpp.md" for r in results)
+        for query in ['"', "a AND", "NOT x", "(a", "x*", "title:foo", "NEAR(a b)"]:
+            kb.search(query)
+        assert kb.search("!!!") == []
 
 
 class TestGet:
