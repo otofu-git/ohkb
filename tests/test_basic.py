@@ -485,8 +485,32 @@ class TestLint:
         assert isinstance(data, list)
 
 
+class TestIndexCommand:
+    def test_index_writes_file_and_writes_drop_it(self, runner, tmp_ohkb_dir):
+        index_path = tmp_ohkb_dir / "wiki" / "_index.md"
+        _learn(runner, "Fact.", title="First", category="test", tags="t", aliases="a")
+        assert not index_path.exists()  # writes no longer rebuild _index.md
+
+        result = runner.invoke(main, ["index"])
+        assert result.exit_code == 0
+        assert "First" in result.output
+        assert index_path.exists()
+
+        _learn(runner, "Fact.", title="Second", category="test", tags="t", aliases="a")
+        assert not index_path.exists()  # invalidated, never stale
+        assert "Second" in runner.invoke(main, ["index"]).output
+
+    def test_index_category(self, runner, tmp_ohkb_dir):
+        _learn(runner, "A.", title="Alpha", category="a", tags="t", aliases="x")
+        _learn(runner, "B.", title="Beta", category="b", tags="t", aliases="y")
+        result = runner.invoke(main, ["index", "-c", "a"])
+        assert result.exit_code == 0
+        assert "Alpha" in result.output
+        assert "Beta" not in result.output
+
+
 class TestVersion:
-    def test_version_is_010(self, runner):
+    def test_version_is_021(self, runner):
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.2.0" in result.output
+        assert "0.2.1" in result.output

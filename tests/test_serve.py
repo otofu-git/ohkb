@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
 
-from ohkb.serve import MODES, create_server
+from ohkb.kb import KnowledgeBase
+from ohkb.serve import MODES, _build_instructions, _make_lifespan, create_server
 
 
 @pytest.fixture(autouse=True)
@@ -89,3 +91,40 @@ class TestCreateServer:
         for mode in MODES:
             server = create_server(mode=mode)
             assert server is not None
+
+
+def _tool(server, name: str):
+    tm = getattr(server, "_tool_manager", None) or getattr(server, "tool_manager", None)
+    tools = getattr(tm, "_tools", None) or getattr(tm, "tools", None)
+    return tools[name]
+
+
+class TestSearchFirstWorkflow:
+    def test_instructions_do_not_require_index(self):
+        for mode in MODES:
+            text = _build_instructions(mode)
+            assert "MANDATORY" not in text
+            assert "ALWAYS call 'index'" not in text
+            assert "read it in full" in text
+            assert "prefer the" in text and "most recently updated" in text
+            assert "call 'index' to confirm" not in text
+
+    def test_tool_descriptions(self):
+        server = create_server(mode="readonly")
+        assert "PREREQUISITE" not in _tool(server, "search").description
+        index_tool = _tool(server, "index")
+        assert "ALWAYS" not in index_tool.description
+        assert "category" in index_tool.parameters["properties"]
+
+    def test_startup_does_not_write_index_file(self, tmp_ohkb_dir):
+        kb = KnowledgeBase()
+        kb.learn("Fact.", title="Startup", category="test", tags=["t"])
+        kb.close()
+
+        async def start_and_stop():
+            server = create_server(mode="readonly")
+            async with _make_lifespan("readonly")(server):
+                pass
+
+        asyncio.run(start_and_stop())
+        assert not (tmp_ohkb_dir / "wiki" / "_index.md").exists()

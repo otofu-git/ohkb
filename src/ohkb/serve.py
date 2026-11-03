@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
-from ohkb.index import read_index, refresh_index
+from ohkb.index import generate_overview, invalidate_index
 from ohkb.kb import KnowledgeBase
 from ohkb.store import Store
 
@@ -53,9 +53,6 @@ def _make_lifespan(mode: Mode):
     async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         store = Store()
         kb = KnowledgeBase(store)
-
-        # Generate/refresh _index.md at startup
-        await asyncio.to_thread(refresh_index)
 
         try:
             yield AppContext(kb=kb, mode=mode)
@@ -125,21 +122,23 @@ def _build_instructions(mode: Mode, index_content: str = "") -> str:
         "Knowledge is stored as atomic Markdown files with YAML frontmatter. "
         "Search uses SQLite FTS5 with BM25 ranking (title > tags > aliases > content weight). "
         "No embeddings — tags and aliases drive search quality.\n\n"
-        "## MANDATORY WORKFLOW\n\n"
-        "STEP 1 — ALWAYS call 'index' at the start of every conversation.\n"
-        "         This shows what categories and entries exist in the KB.\n"
-        "         Do NOT skip this step even if you think you know the KB.\n\n"
-        "STEP 2 — Call 'search' with keywords from the user's question.\n"
+        "## WORKFLOW\n\n"
+        "STEP 1 — Call 'search' with the user's question or its key terms.\n"
         "         Any query word can match; entries matching more of it rank higher.\n\n"
-        "STEP 3 — Call 'get' with the exact path from search results to read full content.\n"
-        "         'get' takes a path like 'category/file.md', NOT a search query.\n\n"
+        "STEP 2 — Call 'get' for every entry you will rely on and read it in full before\n"
+        "         answering. Search results list entries without their content; never answer\n"
+        "         from them alone. 'get' takes a path like 'category/file.md', NOT a query.\n\n"
+        "STEP 3 — Answer only from what you read. If entries disagree, say so and prefer the\n"
+        "         most recently updated one. If part of the question is not covered, say which.\n\n"
+        "'index' gives an overview (categories, entry counts, common tags). It is not needed\n"
+        "before searching; use it when asked what the knowledge base covers.\n\n"
     )
 
     if mode == "readonly":
         return base + (
             "MODE: Read-only. Tools: index, search, get, tree, status, lint, reindex, "
             "log, related, extract, source_list.\n"
-            "Use index → search → get to answer questions."
+            "Use search → get to answer questions."
         )
     elif mode == "managed":
         return base + (
@@ -150,14 +149,14 @@ def _build_instructions(mode: Mode, index_content: str = "") -> str:
             "1. Call 'search' to check for duplicates.\n"
             "2. Describe the proposed change to the user.\n"
             "3. Wait for explicit user confirmation.\n"
-            "4. After writing, call 'index' to confirm the change."
+            "4. After writing, call 'get' on the entry to confirm the change."
         )
     else:  # autonomous
         return base + (
             "MODE: Autonomous. Full tools including learn, edit, meta, forget, restore, "
             "source_add.\n\n"
             "Before learn: call 'search' to avoid duplicates.\n"
-            "After any write: call 'index' to confirm the change.\n"
+            "After any write: call 'get' on the entry to confirm the change.\n"
             "Keep entries atomic (one concept, < 3000 chars).\n"
             "Provide 3-7 tags and key synonyms as aliases.\n"
             "Raw material: source_add → extract → you classify → learn."
@@ -172,12 +171,12 @@ def _register_resources(mcp: FastMCP) -> None:
 
     @mcp.resource("ohkb://index")
     def index_resource() -> str:
-        """Knowledge base index -- read this first to understand what knowledge is available.
+        """Knowledge base overview: categories, entry counts and common tags.
 
-        Returns a structured summary of all categories, entries, tags, and file sizes.
-        Use this to orient yourself before searching or reading specific entries.
+        Lists every entry when that fits in about 12,000 characters; larger knowledge bases
+        get a per-category summary. Use 'search' to find specific entries.
         """
-        return read_index()
+        return generate_overview()
 
 
 # ── Read Tools ──────────────────────────────────────────────────────────────
@@ -194,9 +193,6 @@ def _register_read_tools(mcp: FastMCP) -> None:
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
         """Search the knowledge base using full-text search (BM25 ranked).
-
-        PREREQUISITE: If you have not called 'index' yet in this conversation,
-        call 'index' FIRST to understand the KB structure, then come back to search.
 
         Searches titles, tags, aliases, and content.
         Returns a list of matching entries with path, title, tags, and score.
@@ -250,19 +246,20 @@ def _register_read_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def index(
+        category: str = "",
         ctx: Context[ServerSession, AppContext] = None,  # type: ignore[assignment]
     ) -> str:
-        """Read the knowledge base index. ALWAYS call this before search or any other tool.
+        """Overview of the knowledge base: categories with entry counts and common tags.
 
-        Required first step for every conversation. Shows all available categories,
-        entries, tags, and file sizes so you know what to search for.
-        Without this, you cannot know what knowledge exists in the knowledge base.
+        Not needed before 'search'. Use it when the user asks what the knowledge base covers.
+        Lists every entry when that fits in about 12,000 characters; larger knowledge bases
+        get a per-category summary. Pass a category to list the entries in it.
 
-        Call this before: search, get, learn, edit, meta, forget.
-        Keywords: knowledge base overview, what's available, list all, explore, browse,
-                  index, categories, entries, search preparation, knowledge base search.
+        Args:
+            category: Optional category prefix. 'python' also lists 'python/internals'.
         """
-        return read_index()
+        kb = _kb(ctx)
+        return await asyncio.to_thread(generate_overview, kb=kb, category=category or None)
 
     @mcp.tool()
     async def tree(
@@ -325,7 +322,7 @@ def _register_read_tools(mcp: FastMCP) -> None:
         """
         kb = _kb(ctx)
         result = await asyncio.to_thread(kb.reindex)
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
         return _fmt(result)
 
     @mcp.tool()
@@ -433,8 +430,7 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
             overwrite=overwrite,
         )
 
-        # Refresh index after mutation
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
 
         return _fmt(result)
 
@@ -478,8 +474,7 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
             content=content,
         )
 
-        # Refresh index after mutation
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
 
         return _fmt(result)
 
@@ -528,8 +523,7 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
             entity_type=entity_type or None,
         )
 
-        # Refresh index after mutation
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
 
         return _fmt(result)
 
@@ -552,8 +546,7 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
         kb = _kb(ctx)
         result = await asyncio.to_thread(kb.forget, path, reason=reason)
 
-        # Refresh index after mutation
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
 
         return _fmt(result)
 
@@ -581,7 +574,7 @@ def _register_write_tools(mcp: FastMCP, managed: bool = False) -> None:
             archive_path=archive_path or None,
             overwrite=overwrite,
         )
-        await asyncio.to_thread(refresh_index)
+        invalidate_index()
         return _fmt(result)
 
     @mcp.tool()
@@ -614,10 +607,10 @@ def _register_prompts(mcp: FastMCP) -> None:
         return (
             f"Research the topic '{topic}' in the ohkb knowledge base.\n\n"
             "Steps:\n"
-            "1. Read ohkb://index to understand the KB structure.\n"
-            "2. Search with relevant keywords; if no results, retry with synonyms or tags.\n"
-            "3. Use get to read the full content of the most relevant entries.\n"
-            "4. Synthesize a comprehensive answer citing specific entries.\n"
+            "1. Search with relevant keywords; if no results, retry with synonyms or tags.\n"
+            "2. Use get to read the full content of the most relevant entries.\n"
+            "3. Synthesize a comprehensive answer citing specific entries.\n"
+            "4. If entries disagree, say so and prefer the most recently updated one.\n"
             "5. If information is incomplete, note what is missing."
         )
 
@@ -634,7 +627,7 @@ def _register_prompts(mcp: FastMCP) -> None:
             "- Search first to avoid duplicates.\n"
             "- One fact = one entry (keep under 3000 chars).\n"
             "- Provide 3-7 tags and key synonyms as aliases.\n"
-            "- Reuse existing categories from the index; use nested paths for sub-topics.\n"
+            "- Reuse existing categories (see 'index'); use nested paths for sub-topics.\n"
             "- Group related facts under the same category.\n\n"
             f"Text to process:\n\n{text}"
         )

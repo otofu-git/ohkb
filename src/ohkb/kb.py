@@ -115,6 +115,23 @@ class KnowledgeBase:
             "content": lines,
         }
 
+    def catalog(self) -> list[dict]:
+        """Every indexed entry for the knowledge base index, read from SQLite (no file reads).
+
+        Returns a list sorted by category and path, each with keys:
+            path, title, category, tags (list), chars (body length)
+        """
+        try:
+            rows = self._store.catalog()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                return []
+            raise
+        for row in rows:
+            row["tags"] = [tag for tag in (row["tags"] or "").split(",") if tag]
+            row["chars"] = row["chars"] or 0
+        return rows
+
     def tree(self, path: str = "", *, depth: int = 2) -> dict:
         """Browse knowledge structure rooted at `path`, limited to `depth` levels.
 

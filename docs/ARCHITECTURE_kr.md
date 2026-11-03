@@ -64,9 +64,9 @@ CLI와 MCP 서버 모두 `KnowledgeBase` 서비스 레이어만 호출한다 —
 - 3가지 모드: `readonly`, `managed`, `autonomous`
 - 읽기 툴 (전 모드): `search`, `get`, `tree`, `status`, `lint`
 - 쓰기 툴 (`managed`/`autonomous`): `learn`, `edit`, `meta`, `forget`
-- 리소스: `ohkb://index` (자동 생성된 KB 요약)
+- 리소스: `ohkb://index` (검색 색인에서 만든 KB 개요)
 - 프롬프트: `research`, `learn_from_text`, `organize`
-- 모든 쓰기 후 `refresh_index()` 호출
+- 모든 쓰기 후 `invalidate_index()` 호출(`_index.md` 삭제, 읽을 때 SQLite로 다시 만듦)
 
 ### 2. Service Layer (kb.py)
 
@@ -150,7 +150,7 @@ class Entry:
 ~/.ohkb/                        # OHKB_DIR로 오버라이드 가능
   _meta.db                      # SQLite: FTS5 인덱스 + 메타데이터
   wiki/
-    _index.md                   # 자동 생성 KB 요약 (ohkb://index 리소스)
+    _index.md                   # 전체 항목 목록 (`ohkb index`가 씀)
     python/
       free-threaded-python.md   # category = "python"
       internals/
@@ -210,12 +210,13 @@ SQLite `bm25()` 값은 음수(낮을수록 좋음) → `kb.py`에서 `abs()`로 
 
 ## 인덱스 자동 생성 (index.py)
 
-`_index.md`는 `index.py`가 현재 위키 상태를 스캔하여 자동 생성한다.
+`_index.md`는 검색 색인(SQLite)의 전체 항목을 분류별로 나열한 파일이다. 파일을 다시 읽지 않아 수천 개도 수십 ms에 만든다.
 
-- MCP 서버 시작 시 `refresh_index()` 호출
-- 모든 쓰기 작업(`learn`, `edit`, `meta`, `forget`) 후 MCP 레이어에서 `refresh_index()` 호출
-- `ohkb://index` MCP 리소스가 이 파일을 제공
-- CLI는 `_index.md`를 직접 갱신하지 않음 (MCP 전용)
+- `ohkb index`를 실행하거나 `read_index()`가 파일이 없을 때 만든다.
+- 쓰기(`learn`, `edit`, `meta`, `forget`, `restore`, `reindex`) 뒤에는 다시 만들지 않고 지운다(`invalidate_index()`). 낡은 내용이 남지 않고 쓰기 비용이 지식 크기와 무관하다.
+- MCP 서버는 시작할 때 만들지 않는다.
+- MCP `index` 도구와 `ohkb://index`는 `generate_overview()`를 돌려준다. 전체 목록이 `OVERVIEW_MAX_CHARS`(12,000자) 안이면 그대로, 넘으면 분류별 항목 수와 대표 태그(큰 분류부터), `category`를 주면 그 분류의 항목. 에이전트 호스트가 도구 결과 크기를 제한하므로(Claude Code 약 2.5만 토큰) 수천 개 전체 목록은 실패한다.
+- 에이전트는 `index`가 아니라 `search`로 시작한다.
 
 ## MCP 서버 모드
 

@@ -9,7 +9,15 @@ ohkb does not call models. Files are truth; FTS5 is a rebuildable index.
 
 ---
 
-## 0.2.0 — Search tokens (current)
+## 0.2.1 — Index overview (current)
+
+| Area | Contents |
+|------|----------|
+| Index | MCP `index` / `ohkb://index`: full listing up to 12,000 characters, otherwise categories with entry counts and common tags; `index(category)`, `ohkb index -c` |
+| Speed | `_index.md` built from SQLite; not rebuilt at server start or after each write (deleted, rebuilt on read) |
+| Agent guidance | No mandatory `index` call: search → get the entries you rely on → answer; say when entries disagree and prefer the most recently updated |
+
+## 0.2.0 — Search tokens
 
 | Area | Contents |
 |------|----------|

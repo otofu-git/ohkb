@@ -396,6 +396,14 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def catalog(self) -> list[dict]:
+        """Rows for the knowledge base index: path, title, category, tags, body length."""
+        rows = self.conn.execute(
+            "SELECT path, title, category, tags, length(content) AS chars"
+            " FROM entries ORDER BY category, path"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def stats(self) -> dict:
         """Return basic statistics."""
         total = self.conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]

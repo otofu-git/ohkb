@@ -107,14 +107,13 @@ ohkb status --json
 
 안정적으로 사용하려면 매 세션에서 다음 순서를 따르는 것이 좋습니다.
 
-1. `ohkb index`로 현재 구조를 확인합니다.
-2. 새 항목을 만들기 전에 검색합니다.
-3. 검색 결과가 반환한 정확한 경로로 항목을 읽습니다.
+1. 답하거나 새 항목을 만들기 전에 검색합니다.
+2. 검색 결과가 반환한 정확한 경로로 항목을 끝까지 읽은 뒤 근거로 씁니다.
+3. 구조를 둘러봐야 할 때만 `ohkb index`(한 분류는 `ohkb index -c <분류>`)를 씁니다.
 4. 한 번에 하나의 명확한 사실만 추가하거나 수정합니다.
 5. `ohkb status` 또는 `ohkb lint`로 파일과 인덱스 상태를 확인합니다.
 
 ```bash
-ohkb index
 ohkb search "deployment rollback" --json
 ohkb get "operations/deployment-rollback.md" --json
 ohkb learn "..." -t "..." -c operations --tags "..." --aliases "..." --json
@@ -350,7 +349,7 @@ MCP에서 사용할 수 있는 주요 기능은 다음과 같습니다.
 ~/.ohkb/
 ├── _meta.db           # SQLite 메타데이터와 FTS5 인덱스
 ├── wiki/
-│   ├── _index.md      # 자동 생성되는 요약
+│   ├── _index.md      # 항목 목록, `ohkb index`가 씀
 │   └── <category>/
 │       └── <slug>.md  # 지식 항목
 ├── sources/           # 선택 사항인 로컬 원본 파일
@@ -372,7 +371,7 @@ ohkb init
 
 | 명령 | 용도 |
 |------|------|
-| `ohkb index` | 자동 생성된 지식 요약 표시 |
+| `ohkb index` | 분류별 전체 항목 목록(`-c`로 한 분류), `wiki/_index.md`도 씀 |
 | `ohkb search QUERY` | 카테고리와 결과 수를 선택해 검색 |
 | `ohkb get PATH` | 줄 번호와 함께 항목 읽기 |
 | `ohkb tree [PATH]` | 지정한 깊이까지 카테고리 탐색 |
@@ -428,7 +427,7 @@ uv build
 
 ## 버전
 
-현재 릴리스: **0.2.0**
+현재 릴리스: **0.2.1**
 
 향후 기능과 호환성 계획은 [docs/ROADMAP_kr.md](docs/ROADMAP_kr.md)를 참고하세요.
 

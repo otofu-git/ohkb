@@ -26,7 +26,9 @@ ohkb serve --mode autonomous
 
 ### `ohkb://index`
 
-KB structure summary (Markdown). Read this first. Auto-refreshed after writes.
+Knowledge base overview (Markdown), built from the search index: the full entry listing when it fits
+in about 12,000 characters, otherwise categories with entry counts and common tags. Not needed
+before `search`.
 
 ## Read tools
 
@@ -50,7 +52,13 @@ Returns numbered lines + char/line counts.
 
 ### `index`
 
-No params. Returns `_index.md` body. **Call first each session.**
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `category` | string | no | List the entries in this category (prefix match) |
+
+Same overview as `ohkb://index`; with `category`, the entries in that category (truncated with a
+count past about 12,000 characters). Not needed before `search` — the server instructions are
+`search` → `get` the entries you rely on → answer.
 
 ### `tree`
 
@@ -140,6 +148,6 @@ Copy a local file into immutable `sources/`.
 
 ## Prompts
 
-- **research(topic)** — index → search → get → synthesize
+- **research(topic)** — search → get → synthesize (note disagreements, prefer the newest)
 - **learn_from_text(text)** — extract atomic facts → search → learn
 - **organize(category?)** — lint → fix tags → split oversized → report

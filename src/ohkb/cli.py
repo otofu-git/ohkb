@@ -20,11 +20,11 @@ def _get_kb() -> KnowledgeBase:
     return KnowledgeBase()
 
 
-def _refresh_index() -> None:
-    """Regenerate _index.md after a mutating CLI command."""
-    from ohkb.index import refresh_index
+def _invalidate_index() -> None:
+    """Drop _index.md after a mutating CLI command; `ohkb index` rebuilds it from the index."""
+    from ohkb.index import invalidate_index
 
-    refresh_index()
+    invalidate_index()
 
 
 def _split_csv(val: str | None) -> list[str] | None:
@@ -153,7 +153,7 @@ def learn(
     for w in result.get("warnings", []):
         click.echo(f"Warning: {w}", err=True)
 
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -233,7 +233,7 @@ def edit(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
 
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -285,7 +285,7 @@ def meta(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
 
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -309,7 +309,7 @@ def forget(path: str, reason: str, as_json: bool) -> None:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
 
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -378,7 +378,7 @@ def restore(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
 
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -503,7 +503,7 @@ def reindex(as_json: bool) -> None:
     """
     kb = _get_kb()
     result = kb.reindex()
-    _refresh_index()
+    _invalidate_index()
 
     if as_json:
         _json_out(result)
@@ -520,11 +520,19 @@ def reindex(as_json: bool) -> None:
 
 
 @main.command("index")
-def index_cmd() -> None:
-    """Show the auto-generated knowledge base index (_index.md)."""
-    from ohkb.index import read_index
+@click.option("-c", "--category", default=None, help="Only this category (prefix match).")
+def index_cmd(category: str | None) -> None:
+    """Show the knowledge base index: every entry by category.
 
-    click.echo(read_index())
+    Built from the search index in milliseconds. Without --category it also rewrites
+    wiki/_index.md.
+    """
+    from ohkb.index import generate_index_content, refresh_index
+
+    if category:
+        click.echo(generate_index_content(category=category), nl=False)
+        return
+    click.echo(refresh_index().read_text(encoding="utf-8"), nl=False)
 
 
 # ── init ────────────────────────────────────────────────────────────────────

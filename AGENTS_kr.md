@@ -4,7 +4,7 @@ English: [AGENTS.md](AGENTS.md)
 
 > **ohkb** — 에이전트를 위한 간단한 로컬 지식 베이스.
 > 임베딩 없음. 벡터 DB 없음. **ohkb는 모델을 호출하지 않음.**
-> Markdown + SQLite FTS5. 버전 **0.2.0**.
+> Markdown + SQLite FTS5. 버전 **0.2.1**.
 
 이 파일은 **이 저장소에서 작업하는 에이전트**를 위한 소스 오브 트루스입니다.
 
@@ -49,11 +49,13 @@ ruff check src/ tests/
 ## 아키텍처
 
 Presentation → `kb.py` → wiki + store → models + config.
-레이어 건너뛰지 말 것. 뮤테이션 = FS 먼저 → FTS → (선택) `_index.md` 갱신.
+레이어 건너뛰지 말 것. 뮤테이션 = FS 먼저 → FTS → 표현 계층에서 `invalidate_index()`.
+쓰기마다·서버 시작 때 `_index.md`를 다시 만들지 않는다(비용이 지식 크기에 비례).
 
 ## CLI / MCP
 
 영어 [AGENTS.md](AGENTS.md)의 표와 동일.
+MCP 지침: `search` → 근거 항목을 `get`으로 끝까지 읽기 → 답. `index`는 개요이며 먼저 부를 필요 없음.
 모드: readonly / managed / autonomous.
 
 ## 불변조건

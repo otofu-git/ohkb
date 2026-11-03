@@ -107,14 +107,13 @@ ohkb status --json
 
 A reliable session usually follows the same sequence:
 
-1. Run `ohkb index` to see the current structure.
-2. Search before creating anything.
-3. Read exact paths returned by search.
+1. Search before answering or creating anything.
+2. Read the exact paths returned by search, in full, before relying on them.
+3. Use `ohkb index` (or `ohkb index -c <category>`) only when you need to browse the structure.
 4. Add or update one focused fact at a time.
 5. Use `ohkb status` or `ohkb lint` to detect drift.
 
 ```bash
-ohkb index
 ohkb search "deployment rollback" --json
 ohkb get "operations/deployment-rollback.md" --json
 ohkb learn "..." -t "..." -c operations --tags "..." --aliases "..." --json
@@ -350,7 +349,7 @@ By default, all state is stored under `~/.ohkb`:
 ~/.ohkb/
 ├── _meta.db           # SQLite metadata and FTS5 index
 ├── wiki/
-│   ├── _index.md      # generated summary
+│   ├── _index.md      # entry listing, written by `ohkb index`
 │   └── <category>/
 │       └── <slug>.md  # knowledge entries
 ├── sources/           # optional raw local files
@@ -372,7 +371,7 @@ The directory is portable. It can be backed up, searched with standard tools, or
 
 | Command | Purpose |
 |---------|---------|
-| `ohkb index` | Show the generated knowledge summary |
+| `ohkb index` | List every entry by category (`-c` for one category); also writes `wiki/_index.md` |
 | `ohkb search QUERY` | Search with optional category and result limit |
 | `ohkb get PATH` | Read an entry with line numbers |
 | `ohkb tree [PATH]` | Browse categories to a chosen depth |
@@ -428,7 +427,7 @@ The test suite uses real temporary filesystems and SQLite databases rather than 
 
 ## Version
 
-Current release: **0.2.0**
+Current release: **0.2.1**
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for planned work and compatibility milestones.
 

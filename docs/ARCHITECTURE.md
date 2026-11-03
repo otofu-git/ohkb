@@ -55,7 +55,7 @@ ohkb uses a four-layer design. CLI and MCP call only `KnowledgeBase` — never s
 
 - CLI: catch errors → stderr + `SystemExit(1)`; support `--json`
 - MCP: three modes; exceptions propagate as tool errors
-- After mutations: refresh `_index.md` where applicable
+- After mutations: `invalidate_index()` (deletes `_index.md`; rebuilt from SQLite on read)
 
 ### 2. Service (`kb.py`)
 
@@ -133,4 +133,12 @@ Callers see a relative `score` in 0..1. Category filter uses prefix match.
 
 ## Index generation (`index.py`)
 
-`_index.md` is regenerated after mutations (CLI/MCP). Agents should read `ohkb://index` or `ohkb index` first.
+`_index.md` lists every indexed entry by category. It is built from SQLite (no file reads) when
+`ohkb index` runs or `read_index()` finds it missing, and deleted after every write, so it is never
+stale and a write does not cost time proportional to the knowledge base. The MCP server does not
+build it at start.
+
+The MCP `index` tool and `ohkb://index` return `generate_overview()`: the full listing up to
+`OVERVIEW_MAX_CHARS` (12,000), otherwise categories with entry counts and common tags, largest first;
+`index(category)` lists one category. Agent hosts cap tool results (Claude Code at about 25k tokens),
+so a full listing of thousands of entries would fail. Agents start with `search`, not `index`.

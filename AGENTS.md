@@ -4,7 +4,7 @@ Korean: [AGENTS_kr.md](AGENTS_kr.md)
 
 > **ohkb** — simple local knowledge base for agents.
 > No embeddings. No vector DB. **ohkb never calls models.**
-> Markdown files + SQLite FTS5. Version **0.2.0**.
+> Markdown files + SQLite FTS5. Version **0.2.1**.
 
 This file is the source of truth for agents working **in this repository**.
 
@@ -46,7 +46,7 @@ src/ohkb/
   store.py        # SQLite FTS5 + schema migrations
   models.py       # Entry dataclass
   config.py       # OHKB_DIR / paths
-  index.py        # Auto _index.md
+  index.py        # _index.md listing + bounded index overview (from SQLite)
 tests/
   test_kb.py test_basic.py test_index.py test_lifecycle.py test_serve.py test_store.py
 ```
@@ -57,7 +57,7 @@ tests/
 
 ```bash
 uv sync --extra dev
-uv run ohkb --version          # 0.2.0
+uv run ohkb --version          # 0.2.1
 pytest
 ruff check src/ tests/
 ruff format src/ tests/
@@ -85,13 +85,13 @@ models.py + config.py Foundation
 
 1. Filesystem write first (`wiki.py`)
 2. Then FTS update (`store.py`)
-3. Presentation may `refresh_index()` for `_index.md`
+3. Presentation calls `invalidate_index()` after writes; `_index.md` is rebuilt from SQLite on read
 
 Never call `wiki`/`store` from presentation without `KnowledgeBase`.
 
 ---
 
-## CLI (0.2.0)
+## CLI (0.2.1)
 
 | Command | Role |
 |---------|------|
@@ -100,7 +100,7 @@ Never call `wiki`/`store` from presentation without `KnowledgeBase`.
 | `tree` | Structure (`path`, `--depth`) |
 | `status` | Counts + `in_sync` |
 | `lint` | Health / drift / quality |
-| `index` / `reindex` | Summary / rebuild FTS from disk |
+| `index` (`-c`) / `reindex` | Listing from SQLite, writes `_index.md` / rebuild FTS from disk |
 | `learn` / `edit` / `meta` | Create / line edit / metadata |
 | `forget` / `restore` | Archive (versioned) / restore |
 | `init` | Scaffold data dir + agent schema |
@@ -113,7 +113,7 @@ Exit `0` on success; `--json` stdout is always valid JSON.
 
 ---
 
-## MCP (0.2.0)
+## MCP (0.2.1)
 
 | Mode | Tools |
 |------|--------|
@@ -122,6 +122,9 @@ Exit `0` on success; `--json` stdout is always valid JSON.
 | `autonomous` | write immediately |
 
 Resource: `ohkb://index`. Prompts: `research`, `learn_from_text`, `organize`.
+`index(category)` and `ohkb://index` return `generate_overview()`: the full listing up to
+`OVERVIEW_MAX_CHARS` (12,000), otherwise categories with entry counts and common tags.
+Server instructions: `search` → `get` the entries you rely on → answer; `index` is not a first step.
 `search(limit)`, `tree(path, depth)` match CLI.
 
 ---
@@ -189,7 +192,8 @@ Nested categories are first-class (`python/internals/gil.md`).
 **Do**
 
 - Business logic in `kb.py`; thin `cli`/`serve`.
-- Mutation = FS → index → (optional) `_index.md` refresh.
+- Mutation = FS → index → `invalidate_index()` in presentation. Never rebuild `_index.md` per write
+  or at server start (cost grows with the knowledge base).
 - Tests in `test_kb` + CLI coverage in `test_basic`.
 - Keep MCP params aligned with CLI.
 
@@ -200,7 +204,7 @@ Nested categories are first-class (`python/internals/gil.md`).
 - Leave orphan files after path-changing ops.
 - Expand into roadmap features without a request.
 
-**Out of scope for the 0.2.0 core**
+**Out of scope for the 0.2.1 core**
 
 - Structured `ohkb db` tables
 - Document/URL ingest pipelines that own compilation
@@ -232,5 +236,5 @@ ohkb forget "cat/title.md" --reason "..."
 ohkb restore "cat/title.md"
 ```
 
-MCP: call `index` first each session → `search` → `get`.
+MCP: `search` → `get` the entries you rely on → answer. `index` is an overview, not a first step.
 Raw intake: `source_add` → `extract` → you classify → `learn`.
